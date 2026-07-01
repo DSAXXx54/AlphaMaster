@@ -1,0 +1,138 @@
+"""
+config.py — 统一配置模块（项目根目录）
+
+所有子模块从此文件导入 Config，废弃各自的 config.py。
+MT5 连接凭证通过环境变量或 .env 文件加载。
+"""
+import os
+
+try:
+    import MetaTrader5 as mt5
+    _MT5_AVAILABLE = True
+except ImportError:
+    _MT5_AVAILABLE = False
+    # 测试环境无 MT5 时使用整数占位常量（与真实 MT5 值一致）
+    class _MT5Stub:
+        TIMEFRAME_M1  = 1
+        TIMEFRAME_M5  = 5
+        TIMEFRAME_M15 = 15
+        TIMEFRAME_M30 = 30
+        TIMEFRAME_H1  = 16385
+        TIMEFRAME_H4  = 16388
+        TIMEFRAME_D1  = 16408
+        TIMEFRAME_W1  = 32769
+        TIMEFRAME_MN1 = 49153
+    mt5 = _MT5Stub()
+
+try:
+    import torch
+    _TORCH_AVAILABLE = True
+except ImportError:
+    _TORCH_AVAILABLE = False
+
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Config:
+    # ── MT5 连接 ──────────────────────────────────────────
+    MT5_LOGIN    = int(os.getenv("MT5_LOGIN", "0"))
+    MT5_PASSWORD = os.getenv("MT5_PASSWORD", "")
+    MT5_SERVER   = os.getenv("MT5_SERVER", "")
+
+    # ── 品种与周期 ────────────────────────────────────────
+    SYMBOLS   = ["XAUUSDm", "US500m", "EURUSDm"]
+    TIMEFRAME = mt5.TIMEFRAME_H1   # 可通过 get_timeframe() 修改
+
+    # ── 数据参数 ──────────────────────────────────────────
+    BARS_COUNT            = 9000   # 每品种拉取的历史 K 线数
+    MIN_BARS              = 100    # 低于此值的品种被排除
+    DATA_REFRESH_INTERVAL = 300   # 秒，实盘数据刷新间隔
+
+    # ── 模型参数 ──────────────────────────────────────────
+    INPUT_DIM       = 10           # 特征数，等于 MT5FeatureEngineer 输出维度（已扩展至10个特征）
+    BATCH_SIZE      = 512
+    TRAIN_STEPS     = 500
+    MAX_FORMULA_LEN = 12
+    DEVICE          = (
+        torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        if _TORCH_AVAILABLE
+        else "cpu"
+    )
+
+    # ── 风控参数 ──────────────────────────────────────────
+    RISK_PER_TRADE     = 0.01      # 每笔风险敞口（账户净值的 1%）
+    COST_RATE          = 0.0001    # 单边点差+佣金（forex/metals）
+    MAX_OPEN_POSITIONS = 3
+
+    # ── 策略参数 ──────────────────────────────────────────
+    # SIGNAL_MODE 控制信号→仓位的转换方式：
+    #   "backtest_parity": tanh→sign，与 backtest.py 完全一致（推荐）
+    #   "threshold":       sigmoid + BUY_THRESHOLD / SELL_THRESHOLD（旧逻辑）
+    SIGNAL_MODE = "backtest_parity"
+
+    # EXIT_MODE 控制出场机制：
+    #   "signal":  仅靠信号翻转出场，严格对标回测
+    #   "risk":    保留止损/止盈/追踪止损
+    #   "hybrid":  信号翻转为主，保留紧急熔断（单日最大亏损 / 极端滑点）
+    EXIT_MODE = "signal"
+
+    # threshold 模式专用（SIGNAL_MODE="threshold" 时生效）
+    BUY_THRESHOLD       = 0.70
+    SELL_THRESHOLD      = 0.40
+
+    # risk / hybrid 模式专用（EXIT_MODE != "signal" 时生效）
+    STOP_LOSS_PCT       = -0.02   # -2%
+    TAKE_PROFIT_PCT     = 0.04    # +4%
+    TRAILING_ACTIVATION = 0.03
+    TRAILING_DROP       = 0.015
+
+    # 时间对齐
+    REBALANCE_ON_BAR_CLOSE = True  # True=仅新 K 线收盘后调仓，对标回测
+    EXECUTION_LAG_BARS     = 1     # 与回测 target_ret 的执行延迟对齐
+
+    # 持仓上限：None = 不限制（严格对标回测，各品种独立）
+    # 设为整数（如 3）则启用约束（需回测里同步加同样约束才对标）
+    MAX_OPEN_POSITIONS: int | None = None
+
+    # ── 文件路径 ──────────────────────────────────────────
+    STRATEGY_FILE  = "best_mt5_strategy.json"
+    PORTFOLIO_FILE = "portfolio_state.json"
+    STOP_SIGNAL    = "STOP_SIGNAL"
+
+    # ── Magic Number ──────────────────────────────────────
+    MAGIC_NUMBER = 20250101
+
+    @classmethod
+    def get_timeframe(cls, tf_str: str) -> int:
+        """将字符串（如 'H1'）映射为 MT5 时间周期常量。
+
+        支持的周期：M1, M5, M15, M30, H1, H4, D1, W1, MN1
+
+        Args:
+            tf_str: 时间周期字符串，例如 "H1"
+
+        Returns:
+            对应的 MT5 TIMEFRAME_* 整数常量
+
+        Raises:
+            ValueError: 若 tf_str 不在支持列表中
+        """
+        mapping = {
+            "M1":  mt5.TIMEFRAME_M1,
+            "M5":  mt5.TIMEFRAME_M5,
+            "M15": mt5.TIMEFRAME_M15,
+            "M30": mt5.TIMEFRAME_M30,
+            "H1":  mt5.TIMEFRAME_H1,
+            "H4":  mt5.TIMEFRAME_H4,
+            "D1":  mt5.TIMEFRAME_D1,
+            "W1":  mt5.TIMEFRAME_W1,
+            "MN1": mt5.TIMEFRAME_MN1,
+        }
+        if tf_str not in mapping:
+            raise ValueError(
+                f"Unknown timeframe: '{tf_str}'. "
+                f"Supported values: {list(mapping.keys())}"
+            )
+        return mapping[tf_str]
