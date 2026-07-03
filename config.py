@@ -42,28 +42,45 @@ class Config:
     MT5_SERVER   = os.getenv("MT5_SERVER", "")
 
     # ── 品种与周期 ────────────────────────────────────────
-    # TRADE_SYMBOLS：实际交易的品种（用于生成信号和下单）
-    SYMBOLS   = ["EURUSDm", "USDJPYm", "XAUUSDm", "USTECm", "US500m"]
+    # TRADE_SYMBOLS：实际交易的品种（新账号，无 m 后缀）
+    SYMBOLS   = [
+        # 外汇
+        "EURUSD", "USDJPY",
+        # 贵金属 + 大宗商品
+        "XAUUSD", "AAVUSD", "COCOA.c",
+        # 美国指数
+        "US30.cash", "US100.cash", "US500.cash", "US2000.cash",
+        # 其他指数
+        "JP225.cash",
+    ]
+
+    # 相关性分组（用于分组训练）
+    SYMBOL_GROUPS = {
+        "forex":      ["EURUSD", "USDJPY"],
+        "metals_comm":["XAUUSD", "AAVUSD", "COCOA.c"],
+        "index":      ["US30.cash", "US100.cash", "US500.cash", "US2000.cash", "JP225.cash"],
+    }
 
     # FEATURE_SYMBOLS：用于计算截面特征的宽品种集
     # 包含主要外汇、贵金属、大宗商品、主流指数，时间与 SYMBOLS 高度对齐
     # REL_RET5/REL_RET20/REL_VOL 等跨资产特征将基于这 40 个品种计算截面均值
     # 若设为 None，则退化为只用 SYMBOLS（5品种截面）
     FEATURE_SYMBOLS = [
-        # 主要外汇（24个）
-        "EURUSDm", "GBPUSDm", "AUDUSDm", "NZDUSDm", "USDCADm", "USDCHFm",
-        "USDJPYm", "EURJPYm", "GBPJPYm", "AUDJPYm", "EURGBPm", "EURAUDm",
-        "EURCADm", "EURCHFm", "GBPAUDm", "GBPCADm", "GBPCHFm",
-        "AUDCADm", "AUDCHFm", "AUDNZDm", "NZDCADm", "NZDCHFm", "NZDJPYm",
-        "CADCHFm", "CADJPYm", "CHFJPYm",
+        # 主要外汇（26个）
+        "EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF",
+        "USDJPY", "EURJPY", "GBPJPY", "AUDJPY", "EURGBP", "EURAUD",
+        "EURCAD", "EURCHF", "GBPAUD", "GBPCAD", "GBPCHF",
+        "AUDCAD", "AUDCHF", "AUDNZD", "NZDCAD", "NZDCHF", "NZDJPY",
+        "CADCHF", "CADJPY", "CHFJPY",
         # 贵金属（3个）
-        "XAUUSDm", "XAGUSDm", "XPTUSDm",
+        "XAUUSD", "XAGUSD", "XPTUSD",
         # 美元指数（1个）
-        "DXYm",
+        "DXY.cash",
         # 大宗商品（2个）
-        "USOILm", "UKOILm",
+        "USOIL.cash", "UKOIL.cash",
         # 主流指数（8个）
-        "US30m", "US500m", "USTECm", "UK100m", "DE30m", "FR40m", "JP225m", "AUS200m",
+        "US30.cash", "US500.cash", "US100.cash", "UK100.cash",
+        "DE30.cash", "FR40.cash", "JP225.cash", "AUS200.cash",
     ]
 
     # ── 数据参数 ──────────────────────────────────────────

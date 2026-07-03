@@ -1,19 +1,17 @@
 """
-main.py — 多因子训练入口
+main.py — 多因子训练入口（分组训练）
 
 使用方法：
-    python main.py                     # 每品种单独训练（默认，防过拟合）
-    python main.py XAUUSDm             # 只训练指定品种
-    python main.py --cross-section     # 截面模式：5品种一起训练，可用跨资产特征
+    python main.py                      # 按 SYMBOL_GROUPS 分组训练（默认推荐）
+    python main.py --single XAUUSD      # 只训练单个品种
+    python main.py --cross-section      # 所有品种一起训练（截面）
+    python main.py --group risk         # 只训练 risk 组
 
-单独训练 vs 截面训练：
-  单独训练（默认）：每个品种找自己的最优公式，互相独立，适合差异大的品种
-  截面训练：N=5 一起跑，REL_RET5/REL_RET20/REL_VOL 等跨资产特征才有意义，
-            能找到"在5个品种里选强做多/选弱做空"的截面排名因子，
-            结果保存到 strategies/best_cross_section.json
+分组说明（Config.SYMBOL_GROUPS）：
+    forex 组（EURUSD, USDJPY）：外汇，美元方向因子，2品种×11000=22000样本
+    risk  组（XAUUSD, US100.cash, US500.cash）：风险资产，3品种×11000=33000样本
 """
-import sys
-import pathlib
+import sys, pathlib, json
 
 from config import Config
 from data_pipeline.data_manager import MT5DataManager
@@ -21,95 +19,143 @@ from data_pipeline.fetcher import MT5DataFetcher
 from data_pipeline.single_symbol_manager import SingleSymbolDataManager
 from model_core.engine import AlphaEngine
 from model_core.config import ModelConfig
+from model_core.vocab import VOCAB_VERSION
 
 
-def main(target_symbols: list[str] | None = None, cross_section: bool = False):
-    """
-    Args:
-        target_symbols: 要训练的品种列表（单独模式）。None = 全部。
-        cross_section:  True = 截面模式（所有品种一起），False = 逐品种单独训练。
-    """
+class GroupDataManager:
+    """品种分组数据视图，兼容 AlphaEngine 接口（N = 组内品种数）。"""
+    def __init__(self, multi_manager, symbols: list[str]):
+        self._multi   = multi_manager
+        self._symbols = [s for s in symbols if s in multi_manager.symbols]
+        self._idxs    = [multi_manager.symbols.index(s) for s in self._symbols]
+
+    @property
+    def symbols(self): return list(self._symbols)
+
+    @property
+    def raw_dict(self):
+        full = self._multi.raw_dict
+        return {k: v[self._idxs] for k, v in full.items()}
+
+    @property
+    def feat_tensor(self):
+        from model_core.features import MT5FeatureEngineer
+        return MT5FeatureEngineer.compute_features(self.raw_dict)
+
+    @property
+    def target_ret(self):
+        return self._multi.target_ret[self._idxs]
+
+    @property
+    def bar_time(self):
+        return self._multi.bar_time[self._idxs]
+
+
+def save_group_strategy(engine: AlphaEngine, group_name: str, symbols: list[str]):
+    """保存分组策略：group 总文件 + 各品种 best_*.json。"""
+    pathlib.Path("strategies").mkdir(exist_ok=True)
+
+    # 分组总文件
+    gp = pathlib.Path("strategies") / f"best_group_{group_name}.json"
+    gp.write_text(json.dumps({
+        "vocab_version": VOCAB_VERSION,
+        "group":         group_name,
+        "symbols":       symbols,
+        "formula":       engine.best_formula,
+        "best_score":    engine.best_score,
+    }, indent=2))
+
+    # 各品种文件（runner 按品种名加载）
+    for sym in symbols:
+        sp = pathlib.Path("strategies") / f"best_{sym}.json"
+        sp.write_text(json.dumps({
+            "vocab_version": VOCAB_VERSION,
+            "symbol":        sym,
+            "group":         group_name,
+            "formula":       engine.best_formula,
+            "best_score":    engine.best_score,
+            "source":        f"group_{group_name}",
+        }, indent=2))
+
+    print(f"  已保存: best_group_{group_name}.json + {len(symbols)} 个品种文件")
+
+
+def train_group(multi_mgr, group_name: str, symbols: list[str]):
+    """训练一个品种组，返回 AlphaEngine。"""
+    print(f"\n{'─'*60}")
+    print(f"  [{group_name}] 组: {symbols}")
+    print(f"{'─'*60}")
+
+    mgr = GroupDataManager(multi_mgr, symbols)
+    if not mgr.symbols:
+        print(f"  [跳过] 无有效品种")
+        return None
+
+    engine = AlphaEngine(data_manager=mgr, target_symbol=group_name)
+    engine.train()
+    save_group_strategy(engine, group_name, mgr.symbols)
+    return engine
+
+
+def main():
+    cross    = "--cross-section" in sys.argv
+    single   = "--single" in sys.argv
+    grp_only = None
+    if "--group" in sys.argv:
+        idx      = sys.argv.index("--group")
+        grp_only = sys.argv[idx + 1] if idx + 1 < len(sys.argv) else None
+    single_sym = [s for s in sys.argv[1:] if not s.startswith("--")] or None
+
+    mode = "截面" if cross else ("单品种" if single else "分组")
     print(f"{'='*60}")
-    print(f"  AlphaGPT {'截面' if cross_section else '多因子'}训练")
+    print(f"  AlphaGPT 训练 [{mode}模式]")
     print(f"  TRAIN_STEPS={ModelConfig.TRAIN_STEPS}  "
           f"MAX_FORMULA_LEN={ModelConfig.MAX_FORMULA_LEN}  "
           f"BATCH_SIZE={ModelConfig.BATCH_SIZE}")
+    print(f"  SYMBOLS={Config.SYMBOLS}")
     print(f"{'='*60}")
 
     with MT5DataFetcher() as fetcher:
         multi_mgr = MT5DataManager(fetcher)
         multi_mgr.load()
 
-        if cross_section:
-            # ── 截面模式：所有品种一起训练 ───────────────────────────
-            print(f"  截面训练品种: {multi_mgr.symbols}")
-            print(f"  特征包含跨资产 REL_RET5/REL_RET20/REL_VOL，N={len(multi_mgr.symbols)}\n")
-
-            engine = AlphaEngine(
-                data_manager=multi_mgr,
-                target_symbol=None,   # None = 截面模式，策略存 best_mt5_strategy.json
-            )
+        if single and single_sym:
+            sym    = single_sym[0]
+            s_mgr  = SingleSymbolDataManager(multi_mgr, sym)
+            engine = AlphaEngine(data_manager=s_mgr, target_symbol=sym)
             engine.train()
 
-            print(f"\n{'─'*60}")
-            print(f"  截面训练完成")
-            print(f"  BestScore={engine.best_score:.4f}")
-            print(f"  公式: {engine._decode_formula(engine.best_formula)}")
-            print(f"  → 结果已保存到 strategies/best_cross_section.json")
-
-            # 截面模式额外存一份带标识的文件
-            import json
-            from model_core.vocab import VOCAB_VERSION
-            cs_path = pathlib.Path("strategies") / "best_cross_section.json"
-            cs_path.parent.mkdir(parents=True, exist_ok=True)
-            cs_path.write_text(json.dumps({
-                "vocab_version": VOCAB_VERSION,
-                "symbol":        "cross_section",
-                "formula":       engine.best_formula,
-                "best_score":    engine.best_score,
-                "mode":          "cross_section_N5",
-            }, indent=2))
+        elif cross:
+            engine = AlphaEngine(data_manager=multi_mgr, target_symbol=None)
+            engine.train()
+            save_group_strategy(engine, "cross_section", multi_mgr.symbols)
 
         else:
-            # ── 逐品种单独训练（原有逻辑）──────────────────────────
-            symbols_to_train = target_symbols or multi_mgr.symbols
-            print(f"  准备训练品种: {symbols_to_train}\n")
+            # 分组训练（默认）
+            groups = getattr(Config, "SYMBOL_GROUPS", {
+                "forex": ["EURUSD", "USDJPY"],
+                "risk":  ["XAUUSD", "US100.cash", "US500.cash"],
+            })
+            if grp_only:
+                groups = {grp_only: groups[grp_only]} if grp_only in groups else groups
 
             results = {}
-            for symbol in symbols_to_train:
-                if symbol not in multi_mgr.symbols:
-                    print(f"  [跳过] {symbol} 不在已加载数据中")
-                    continue
-
-                print(f"\n{'─'*60}")
-                print(f"  开始训练: {symbol}")
-                print(f"{'─'*60}")
-
-                single_mgr = SingleSymbolDataManager(multi_mgr, symbol)
-                engine = AlphaEngine(
-                    data_manager=single_mgr,
-                    target_symbol=symbol,
-                )
-                engine.train()
-
-                results[symbol] = {
-                    "best_score": engine.best_score,
-                    "formula":    engine.best_formula,
-                    "readable":   engine._decode_formula(engine.best_formula),
-                }
+            for gname, gsyms in groups.items():
+                eng = train_group(multi_mgr, gname, gsyms)
+                if eng:
+                    results[gname] = {
+                        "score":   eng.best_score,
+                        "formula": eng._decode_formula(eng.best_formula),
+                    }
 
             print(f"\n{'='*60}")
-            print(f"  训练完成汇总")
+            print(f"  分组训练完成")
             print(f"{'='*60}")
-            for sym, r in results.items():
-                print(f"  {sym:12s}  BestScore={r['best_score']:.4f}")
-                print(f"             {r['readable']}")
-                sp = pathlib.Path("strategies") / f"best_{sym}.json"
-                print(f"             → {sp}")
+            for gname, r in results.items():
+                print(f"  [{gname}]: score={r['score']:.4f}")
+                print(f"    {r['formula']}")
             print()
 
 
 if __name__ == "__main__":
-    cross = "--cross-section" in sys.argv
-    cli_symbols = [s for s in sys.argv[1:] if not s.startswith("--")] or None
-    main(target_symbols=cli_symbols, cross_section=cross)
+    main()
