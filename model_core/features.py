@@ -8,15 +8,15 @@ Features:
   Volume (14-16):   VOL_RATIO, VOL_Z, PV_CORR
   Cross-asset (17-19): REL_RET5, REL_RET20, REL_VOL
 
-Output: [N, 20, T], all normalized, no NaN/Inf.
+Output: [N, 30, T], all normalized, no NaN/Inf. (v3.0: 20→30 features)
 """
 import torch
 
 
 class MT5FeatureEngineer:
-    """MT5 Feature Engineer (20 features)."""
+    """MT5 Feature Engineer (30 features, v3.0)."""
 
-    INPUT_DIM    = 20
+    INPUT_DIM    = 30  # v3.0: 20→30
     _CLIP_BOUND  = 5.0
     _EPS         = 1e-9
     _MA_WINDOW   = 20
@@ -150,11 +150,128 @@ class MT5FeatureEngineer:
         pad  = torch.zeros(N, 20, device=close.device, dtype=close.dtype)
         return torch.cat([pad, raw], dim=1)
 
+    # ── v3.0 新增特征 helper ───────────────────────────────────────────
+
+    @staticmethod
+    def _vwap_dev(close: torch.Tensor, high: torch.Tensor,
+                  low: torch.Tensor, volume: torch.Tensor, w: int = 20) -> torch.Tensor:
+        """VWAP 偏离: (close - VWAP) / VWAP。VWAP = sum(typical_price * vol) / sum(vol)。"""
+        eps = MT5FeatureEngineer._EPS
+        typical = (high + low + close) / 3.0
+        tpv = typical * volume
+        pad_v = torch.zeros(volume.shape[0], w - 1, device=volume.device, dtype=volume.dtype)
+        pad_tpv = torch.zeros(tpv.shape[0], w - 1, device=tpv.device, dtype=tpv.dtype)
+        vol_w = torch.cat([pad_v, volume], dim=1).unfold(1, w, 1)
+        tpv_w = torch.cat([pad_tpv, tpv], dim=1).unfold(1, w, 1)
+        vwap = tpv_w.sum(dim=-1) / (vol_w.sum(dim=-1) + eps)
+        return (close - vwap) / (vwap + eps)
+
+    @staticmethod
+    def _boll_pos(close: torch.Tensor, w: int = 20) -> tuple[torch.Tensor, torch.Tensor]:
+        """布林带位置[0,1] 和 宽度。返回 (pos, width)。"""
+        eps = MT5FeatureEngineer._EPS
+        ma = MT5FeatureEngineer._rolling_mean(close, w)
+        std = MT5FeatureEngineer._rolling_std(close, w)
+        upper = ma + 2 * std
+        lower = ma - 2 * std
+        pos = (close - lower) / (upper - lower + eps)
+        pos = torch.clamp(pos, 0.0, 1.0)
+        width = (upper - lower) / (ma + eps)
+        return pos, width
+
+    @staticmethod
+    def _macd_hist(close: torch.Tensor) -> torch.Tensor:
+        """MACD 柱 = (EMA12 - EMA26) - Signal(EMA9 of MACD)。"""
+        macd = MT5FeatureEngineer._ema_simple(close, 12) - MT5FeatureEngineer._ema_simple(close, 26)
+        signal = MT5FeatureEngineer._ema_simple(macd, 9)
+        return macd - signal
+
+    @staticmethod
+    def _ema_simple(x: torch.Tensor, span: int) -> torch.Tensor:
+        """指数加权移动平均（因果），递推实现。"""
+        alpha = 2.0 / (span + 1.0)
+        N, T = x.shape
+        out = torch.zeros_like(x)
+        out[:, 0] = x[:, 0]
+        for t in range(1, T):
+            out[:, t] = alpha * x[:, t] + (1 - alpha) * out[:, t - 1]
+        return out
+
+    @staticmethod
+    def _obv_slope(close: torch.Tensor, volume: torch.Tensor, w: int = 20) -> torch.Tensor:
+        """能量潮斜率：OBV 的 w 期线性回归斜率（归一化）。"""
+        eps = MT5FeatureEngineer._EPS
+        ret_sign = torch.sign(close[:, 1:] - close[:, :-1])
+        ret_sign = torch.cat([torch.zeros_like(close[:, :1]), ret_sign], dim=1)
+        obv = torch.cumsum(ret_sign * volume, dim=1)
+        # OBV 斜率（用线性回归）
+        return MT5FeatureEngineer._linear_slope(obv, w)
+
+    @staticmethod
+    def _mfi(close: torch.Tensor, high: torch.Tensor,
+             low: torch.Tensor, volume: torch.Tensor, w: int = 14) -> torch.Tensor:
+        """资金流量指标 MFI（带量版 RSI），归一化到 [-1, 1]。"""
+        eps = MT5FeatureEngineer._EPS
+        typical = (high + low + close) / 3.0
+        mf = typical * volume  # 资金流量
+        pc = torch.cat([typical[:, :1], typical[:, :-1]], dim=1)
+        pos_mf = torch.where(typical > pc, mf, torch.zeros_like(mf))
+        neg_mf = torch.where(typical < pc, mf, torch.zeros_like(mf))
+        pos_sum = MT5FeatureEngineer._rolling_mean(pos_mf, w) * w
+        neg_sum = MT5FeatureEngineer._rolling_mean(neg_mf, w) * w
+        mfr = pos_sum / (neg_sum + eps)
+        mfi = 100.0 - (100.0 / (1.0 + mfr))
+        return (mfi - 50.0) / 50.0
+
+    # ── v3.0 Alpha 101 + 互补特征 helper ─────────────────────────────
+
+    @staticmethod
+    def _willr(close: torch.Tensor, high: torch.Tensor,
+               low: torch.Tensor, w: int = 14) -> torch.Tensor:
+        """威廉指标 Williams %R，归一化到 [-1, 0]（-1=超卖，0=超买）。"""
+        eps = MT5FeatureEngineer._EPS
+        pad = torch.zeros(close.shape[0], w - 1, device=close.device, dtype=high.dtype)
+        hw = torch.cat([pad, high], dim=1).unfold(1, w, 1).max(dim=-1).values
+        lw = torch.cat([pad, low], dim=1).unfold(1, w, 1).min(dim=-1).values
+        willr = (hw - close) / (hw - lw + eps)
+        return torch.clamp(willr, -1.0, 0.0)
+
+    @staticmethod
+    def _cci(close: torch.Tensor, high: torch.Tensor,
+             low: torch.Tensor, w: int = 14) -> torch.Tensor:
+        """商品通道指标 CCI = (typical - MA(typical)) / (0.015 * MAD(typical))。"""
+        eps = MT5FeatureEngineer._EPS
+        typical = (high + low + close) / 3.0
+        ma = MT5FeatureEngineer._rolling_mean(typical, w)
+        pad = torch.zeros(typical.shape[0], w - 1, device=typical.device, dtype=typical.dtype)
+        tw = torch.cat([pad, typical], dim=1).unfold(1, w, 1)
+        mad = (tw - tw.mean(dim=-1, keepdim=True)).abs().mean(dim=-1)
+        cci = (typical - ma) / (0.015 * mad + eps)
+        return torch.clamp(cci / 200.0, -1.0, 1.0)  # 归一化到 [-1, 1]
+
+    @staticmethod
+    def _roc(close: torch.Tensor, w: int = 12) -> torch.Tensor:
+        """变化率 ROC = close[t]/close[t-w] - 1，前 w 位补 0。"""
+        eps = MT5FeatureEngineer._EPS
+        N = close.shape[0]
+        raw = close[:, w:] / (close[:, :-w] + eps) - 1.0
+        pad = torch.zeros(N, w, device=close.device, dtype=close.dtype)
+        return torch.cat([pad, raw], dim=1)
+
+    @staticmethod
+    def _typical_dev(close: torch.Tensor, high: torch.Tensor,
+                     low: torch.Tensor, w: int = 20) -> torch.Tensor:
+        """典型价格 (H+L+C)/3 偏离其 MA_w。与 VWAP_DEV 互补（无成交量加权）。"""
+        eps = MT5FeatureEngineer._EPS
+        typical = (high + low + close) / 3.0
+        ma = MT5FeatureEngineer._rolling_mean(typical, w)
+        return (typical - ma) / (ma + eps)
+
     # ── main ─────────────────────────────────────────────────────────────
 
     @staticmethod
     def compute_features(raw_dict: dict) -> torch.Tensor:
-        """Compute 20 features, returns [N, 20, T]."""
+        """Compute 30 features, returns [N, 30, T]."""
         close  = raw_dict["close"].float()
         open_  = raw_dict["open"].float()
         high   = raw_dict["high"].float()
@@ -244,11 +361,45 @@ class MT5FeatureEngineer:
         # 19: REL_VOL
         rel_vol = norm(rvol - rvol.mean(dim=0, keepdim=True))
 
+        # ── v3.0 新增特征（20-25）──────────────────────────────────────
+        # 20: VWAP_DEV
+        vwap_dev = norm(fe._vwap_dev(close, high, low, volume))
+
+        # 21: BOLL_POS, 22: BOLL_WIDTH
+        boll_pos, boll_width = fe._boll_pos(close)
+        boll_pos = fe._clean(boll_pos)
+        boll_width = norm(boll_width)
+
+        # 23: MACD_HIST
+        macd_hist = norm(fe._macd_hist(close))
+
+        # 24: OBV_SLOPE
+        obv_slope = norm(fe._obv_slope(close, volume))
+
+        # 25: MFI14
+        mfi = fe._clean(torch.clamp(fe._mfi(close, high, low, volume), -1.0, 1.0))
+
+        # ── v3.0 Alpha 101 + 互补特征（26-29）──────────────────────────
+        # 26: WILLR_14
+        willr = fe._clean(fe._willr(close, high, low))
+
+        # 27: CCI_14
+        cci = fe._clean(fe._cci(close, high, low))
+
+        # 28: ROC_12
+        roc = norm(fe._roc(close, 12))
+
+        # 29: TYPICAL_DEV
+        typical_dev = norm(fe._typical_dev(close, high, low))
+
         features = torch.stack([
             ret, ret5, ret20, ma_diff, slope,       # trend  0-4
             atr, rvol, hl_range, vol_regime,         # vol    5-8
             dev, dev60, rsi, pressure, ac1,          # rev    9-13
             vol_ratio, vol_z, pv_corr,               # volume 14-16
             rel_ret5, rel_ret20, rel_vol,            # cross  17-19
+            vwap_dev, boll_pos, boll_width,          # v3.0a  20-22
+            macd_hist, obv_slope, mfi,               # v3.0b  23-25
+            willr, cci, roc, typical_dev,            # a101+  26-29
         ], dim=1)
         return torch.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)

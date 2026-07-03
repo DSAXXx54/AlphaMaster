@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from .ops import OPS_CONFIG
 
 # 词表版本：特征顺序变化时递增，旧 checkpoint / best_strategy.json 与新版本不兼容
-VOCAB_VERSION = "2.0"   # v1.0=10特征, v2.0=20特征(2026-07)
+VOCAB_VERSION = "3.0"   # v1.0=10特征, v2.0=20特征(2026-07), v3.0=30特征+44算子(2026-07-03)
 
 
 FEATURE_NAMES = (
@@ -32,6 +32,18 @@ FEATURE_NAMES = (
     "REL_RET5",     # 17 相对5期收益（截面去均值）
     "REL_RET20",    # 18 相对20期收益（截面去均值）
     "REL_VOL",      # 19 相对波动率（截面去均值）
+    # ── v3.0 新增特征（20-25）──────────────────────────────────────────
+    "VWAP_DEV",     # 20 (close-VWAP)/VWAP 成交量加权均价偏离
+    "BOLL_POS",     # 21 布林带位置[0,1] 标准化超买超卖
+    "BOLL_WIDTH",   # 22 布林带宽度 波动率收缩/扩张
+    "MACD_HIST",    # 23 MACD柱 (快线-慢线-信号线)
+    "OBV_SLOPE",    # 24 能量潮斜率 累积量能趋势
+    "MFI14",        # 25 资金流量指标 带量版RSI[-1,1]
+    # ── v3.0 Alpha 101 + 互补特征（26-29）──────────────────────────────
+    "WILLR_14",     # 26 威廉指标[-1,0] 超买超卖（比RSI更敏感）
+    "CCI_14",       # 27 商品通道指标 均值回归信号
+    "ROC_12",       # 28 12期变化率 与RET5/RET20互补
+    "TYPICAL_DEV",  # 29 典型价格偏离MA 与VWAP_DEV互补
 )
 
 
