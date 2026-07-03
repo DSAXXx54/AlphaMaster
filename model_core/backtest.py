@@ -255,7 +255,10 @@ class MT5Backtest:
     ) -> tuple[Tensor, Tensor]:
         """在指定训练/验证切片上计算组合多目标得分。
 
-        train_score 和 val_score 使用同一套多目标框架，保证"选王"标准一致。
+        train_score：用于 REINFORCE 梯度更新（in-sample 多目标）。
+        val_score：用于选冠军，加入 OOS Sortino 门控：
+          - OOS Sortino <= 0：乘以 0.1~0.5 惩罚，强制冠军必须在验证段盈利
+          - OOS Sortino > 0：乘以最多 1.2 奖励
         """
         position = compute_target_positions_stateless(factors)  # neutral band
 
@@ -275,13 +278,21 @@ class MT5Backtest:
             position[:, train_start:train_end],
         ) + self._turnover_penalty(turnover[:, train_start:train_end])
 
-        # 验证段：同一套多目标（不加换手惩罚，避免双重惩罚）
-        val_score = self._multi_objective(
+        # 验证段：多目标 × OOS Sortino 门控
+        base_val    = self._multi_objective(
             factors[:, val_start:val_end],
             target_ret[:, val_start:val_end],
             pnl_val,
             position[:, val_start:val_end],
         )
+        oos_sor = self._sortino(pnl_val).item()
+        if oos_sor <= 0:
+            # OOS亏损：重惩罚（Sortino=-1 → mult=0.1；Sortino=0 → mult=0.5）
+            mult = max(0.1, 0.5 + oos_sor * 0.4)
+        else:
+            # OOS盈利：轻奖励（最多+20%）
+            mult = min(1.2, 1.0 + oos_sor * 0.1)
+        val_score = base_val * mult
 
         return train_score, val_score
 
@@ -349,7 +360,7 @@ class MT5Backtest:
         raw_dict:   dict,
         target_ret: Tensor,
     ) -> tuple[Tensor, float]:
-        """评估一组 Alpha 因子（组合多目标得分）。"""
+        """评估一组 Alpha 因子（含 OOS 80/20 门控）。"""
         position = compute_target_positions_stateless(factors)
 
         prev_pos = torch.roll(position, 1, dims=1)
@@ -365,5 +376,14 @@ class MT5Backtest:
             pnl[:, :split], position[:, :split],
         ) + self._turnover_penalty(turnover[:, :split])
 
-        mean_oos = pnl[:, split:].mean().item()
+        # OOS 门控（最后 20%）
+        pnl_oos = pnl[:, split:]
+        oos_sor = self._sortino(pnl_oos).item()
+        if oos_sor <= 0:
+            mult = max(0.1, 0.5 + oos_sor * 0.4)
+            score = score * mult
+        else:
+            score = score * min(1.2, 1.0 + oos_sor * 0.1)
+
+        mean_oos = pnl_oos.mean().item()
         return score, mean_oos

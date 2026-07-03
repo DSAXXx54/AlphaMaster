@@ -120,6 +120,77 @@ class MT5RiskEngine:
         return lot
 
     # ------------------------------------------------------------------
+    # ATR 波动率目标仓位（推荐方法）
+    # ------------------------------------------------------------------
+
+    def calculate_lot_by_atr(
+        self,
+        symbol:         str,
+        equity:         float,
+        atr_price:      float,
+        target_risk_pct: float | None = None,
+        max_lot:        float         = 0.1,
+    ) -> float:
+        """基于 ATR 的波动率目标仓位计算。
+
+        每笔交易的预期盈亏金额 = target_risk_pct × equity，
+        手数 = 目标风险金额 / (ATR × 合约价值/手)
+
+        这样不同品种（黄金/美日/纳指/标普）下单后，
+        每 1 个 ATR 波动对应的盈亏金额是相同的，资金暴露均衡。
+
+        Args:
+            symbol:          MT5 品种名
+            equity:          账户净值（账户货币）
+            atr_price:       品种价格单位的 ATR 值（已乘以合约乘数前）
+            target_risk_pct: 目标风险比例，None 时用 Config.RISK_PER_TRADE
+            max_lot:         手数硬性上限
+
+        Returns:
+            有效手数（已舍入，已 clamp），或 0.01（最小手数回退）
+        """
+        if target_risk_pct is None:
+            target_risk_pct = self.risk_per_trade
+
+        if equity <= 0 or atr_price <= 0:
+            logger.warning(f"[RiskEngine.atr] Invalid equity={equity} or atr={atr_price}")
+            return 0.0
+
+        symbol_info = self._get_symbol_info(symbol)
+        if symbol_info is None:
+            logger.warning(f"[RiskEngine.atr] No symbol_info for {symbol}")
+            return 0.01
+
+        # 合约价值（每手）= contract_size × tick_value / tick_size × 当前价格
+        # 简化：使用 trade_tick_value / trade_tick_size 得到每价格单位每手的盈亏
+        tick_val  = symbol_info.trade_tick_value   # 每 tick 每手的盈亏（账户货币）
+        tick_size = symbol_info.trade_tick_size    # 每 tick 的价格变化
+        if tick_val <= 0 or tick_size <= 0:
+            logger.warning(f"[RiskEngine.atr] Invalid tick data for {symbol}")
+            return symbol_info.volume_min
+
+        # 每价格单位每手的盈亏 = tick_val / tick_size
+        value_per_unit = tick_val / tick_size       # $/price_unit/lot
+
+        # 目标风险金额 = equity × target_risk_pct
+        target_risk_usd = equity * target_risk_pct
+
+        # 手数 = 目标风险 / (ATR × 每单位价值/手)
+        # 含义：1个ATR波动时的盈亏 = target_risk_usd
+        desired_lot = target_risk_usd / (atr_price * value_per_unit)
+
+        # 舍入到 volume_step，clamp
+        step = symbol_info.volume_step
+        lot  = round(desired_lot / step) * step
+        lot  = max(symbol_info.volume_min, min(lot, symbol_info.volume_max, max_lot))
+
+        logger.debug(
+            f"[RiskEngine.atr] {symbol}: equity={equity:.0f} atr={atr_price:.4f} "
+            f"val_per_unit={value_per_unit:.4f} desired={desired_lot:.4f} lot={lot:.2f}"
+        )
+        return lot
+
+    # ------------------------------------------------------------------
     # 内部辅助
     # ------------------------------------------------------------------
 

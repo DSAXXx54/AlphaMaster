@@ -16,7 +16,6 @@ eggs/
 .eggs/
 lib/
 lib64/
-logs/
 parts/
 sdist/
 tmp/
@@ -40,9 +39,10 @@ ENV/
 *.swo
 *~
 
-# Environment variables
+# Environment variables / secrets
 .env
-.env.local
+.env.*
+!.env.example
 
 # Testing
 .pytest_cache/
@@ -56,3 +56,39 @@ htmlcov/
 # OS
 .DS_Store
 Thumbs.db
+
+# ── MT5 AlphaGPT: 训练产物（体积大、可本地再生）────────────────────
+checkpoints/
+*.pt
+*.pth
+training_history*.json
+best_mt5_strategy.json
+
+# ── 策略输出（训练/回测生成，非源码）────────────────────────────────
+strategies/best_*.json
+strategies/strategy_*.json
+strategies/aligned_symbols*.json
+strategies/aligned_symbols*.txt
+strategies/*_progress.txt
+
+# ── 回测输出（图表与报告）──────────────────────────────────────────
+backtest_output/
+backtest_output_*/
+
+# ── 实盘/运行态文件 ────────────────────────────────────────────────
+portfolio_state.json
+STOP_SIGNAL
+train.pid
+train_stdout.log
+train_stderr.log
+*.log
+logs/
+
+# ── 本地数据缓存 ───────────────────────────────────────────────────
+data/cache/
+**/kline_cache/
+*.hcc
+*.hc
+
+# ── 临时脚本/分析输出 ──────────────────────────────────────────────
+_tmp_*.py

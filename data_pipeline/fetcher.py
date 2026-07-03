@@ -51,7 +51,7 @@ class MT5DataFetcher:
         logger.info("MT5 connection established.")
 
     def fetch(self, symbol: str, timeframe: int, count: int) -> pd.DataFrame:
-        """获取指定品种的历史 OHLCV 数据。
+        """获取指定品种的历史 OHLCV 数据（优先读本地缓存，增量更新）。
 
         Args:
             symbol:    MT5 品种标识符，例如 "XAUUSD"。
@@ -62,6 +62,18 @@ class MT5DataFetcher:
             包含列 time, open, high, low, close, tick_volume 的 DataFrame。
             若品种不可用，返回空 DataFrame（列名相同）。
         """
+        # ── 优先读本地缓存 ────────────────────────────────────────────
+        try:
+            from data_pipeline.kline_cache import KlineCache
+            cache = KlineCache(timeframe=timeframe, bars_count=count)
+            df = cache.get(symbol, mt5_connected=(_MT5_AVAILABLE and mt5 is not None))
+            if df is not None and len(df) >= count * 0.5:
+                # 本地有足够数据（至少要求的 50%），直接返回最新的 count 根
+                return df.tail(count).reset_index(drop=True)
+        except Exception as exc:
+            logger.debug(f"[Fetcher] Cache read failed for {symbol}: {exc}, falling back to MT5")
+
+        # ── 缓存不足时从 MT5 直接拉 ──────────────────────────────────
         if not _MT5_AVAILABLE or mt5 is None:
             logger.warning(f"MT5 not available, returning empty DataFrame for {symbol}.")
             return pd.DataFrame(columns=_COLUMNS)
@@ -76,7 +88,7 @@ class MT5DataFetcher:
             return pd.DataFrame(columns=_COLUMNS)
 
         df = pd.DataFrame(rates)[_COLUMNS]
-        logger.debug(f"Fetched {len(df)} bars for {symbol} (timeframe={timeframe}).")
+        logger.debug(f"Fetched {len(df)} bars for {symbol} (timeframe={timeframe}) from MT5.")
         return df
 
     def shutdown(self) -> None:

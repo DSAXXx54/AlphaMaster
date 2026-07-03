@@ -156,7 +156,7 @@ class MT5Trader:
             "magic":    Config.MAGIC_NUMBER,
             "comment":  "MT5AlphaGPT_buy",
             "type_time": 0,   # ORDER_TIME_GTC
-            "type_filling": 2,  # ORDER_FILLING_IOC（部分成交）
+            "type_filling": mt5.ORDER_FILLING_FOK,  # ORDER_FILLING_IOC（部分成交）
         }
 
         # Step 3: 发送订单
@@ -213,7 +213,7 @@ class MT5Trader:
             "magic":    Config.MAGIC_NUMBER,
             "comment":  "MT5AlphaGPT_sell",
             "type_time": 0,   # ORDER_TIME_GTC
-            "type_filling": 2,  # ORDER_FILLING_IOC
+            "type_filling": mt5.ORDER_FILLING_FOK,  # ORDER_FILLING_IOC
         }
 
         # Step 3: 发送订单
@@ -274,7 +274,7 @@ class MT5Trader:
             "magic":        Config.MAGIC_NUMBER,
             "comment":      comment,
             "type_time":    0,
-            "type_filling": 2,
+            "type_filling": mt5.ORDER_FILLING_FOK,
         }
         if ticket > 0:
             request["position"] = ticket   # 平指定 ticket，不误开新仓
@@ -328,7 +328,7 @@ class MT5Trader:
             "magic":        Config.MAGIC_NUMBER,
             "comment":      "MT5AlphaGPT_open_short",
             "type_time":    0,
-            "type_filling": 2,
+            "type_filling": mt5.ORDER_FILLING_FOK,
         }
         result = mt5.order_send(request)
         if result is None:

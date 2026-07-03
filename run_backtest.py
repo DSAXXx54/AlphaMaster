@@ -1,19 +1,19 @@
 """
-run_backtest.py — 多因子组合回测脚本
+run_backtest.py — 多因子组合回测（含真实点差、夏普、资金曲线）
 
 用法：
-    python run_backtest.py              # 加载 strategies/best_{symbol}.json（多因子模式）
-    python run_backtest.py --single     # 加载 best_mt5_strategy.json（单公式兼容模式）
-
-多因子模式：
-    - 为每个品种加载各自的最优公式
-    - 每个品种使用自己的因子独立生成信号
-    - 汇总组合级统计
+    python run_backtest.py              # 多因子模式（每品种独立公式）
+    python run_backtest.py --single     # 单公式兼容模式
 """
 
-import json
-import sys
+import json, sys, math
 from pathlib import Path
+import numpy as np
+import torch
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -24,7 +24,37 @@ from backtest_viz import BacktestEngine, BacktestChart, BacktestReport
 from model_core.vocab import FORMULA_VOCAB, VOCAB_VERSION
 from model_core.vm import StackVM
 from model_core.features import MT5FeatureEngineer
-import torch
+from strategy_manager.signal import compute_target_positions_stateless
+
+# ── 各品种真实点差（从 MT5 实时获取，单边 log cost）──────────────────────────
+# 运行时自动刷新；若 MT5 不可用则用保守默认值
+DEFAULT_COST_RATES = {
+    "EURUSDm": 0.000035,
+    "USDJPYm": 0.000031,
+    "XAUUSDm": 0.000031,
+    "USTECm":  0.000041,
+    "US500m":  0.000048,
+}
+_H1_PER_YEAR = 6240
+
+
+def get_live_spreads() -> dict[str, float]:
+    """从 MT5 实时获取各品种点差，返回 {symbol: log_cost_rate}。"""
+    try:
+        import MetaTrader5 as mt5
+        mt5.initialize()
+        costs = {}
+        for sym in Config.SYMBOLS:
+            tick = mt5.symbol_info_tick(sym)
+            if tick and tick.ask > 0:
+                mid = (tick.ask + tick.bid) / 2
+                costs[sym] = (tick.ask - tick.bid) / mid / 2   # 单边
+            else:
+                costs[sym] = DEFAULT_COST_RATES.get(sym, 0.0001)
+        mt5.shutdown()
+        return costs
+    except Exception:
+        return dict(DEFAULT_COST_RATES)
 
 
 def decode_formula(tokens: list[int]) -> str:
@@ -33,7 +63,6 @@ def decode_formula(tokens: list[int]) -> str:
 
 
 def load_strategy(path: Path) -> dict | None:
-    """加载策略文件，返回含 formula/vocab_version 的 dict，或 None。"""
     if not path.exists():
         return None
     with open(path) as f:
@@ -43,49 +72,161 @@ def load_strategy(path: Path) -> dict | None:
     return data
 
 
+# ── 统计指标 ──────────────────────────────────────────────────────────────────
+
+def calc_sharpe(pnl: np.ndarray, periods_per_year: int = _H1_PER_YEAR) -> float:
+    """年化 Sharpe（无风险利率=0）。"""
+    m = pnl.mean()
+    s = pnl.std(ddof=0)
+    if s < 1e-10:
+        return 0.0
+    return float(m / s * math.sqrt(periods_per_year))
+
+
+def calc_sortino(pnl: np.ndarray, periods_per_year: int = _H1_PER_YEAR) -> float:
+    """年化 Sortino（下行标准差）。"""
+    m    = pnl.mean()
+    down = pnl[pnl < 0]
+    ds   = down.std(ddof=0) if len(down) > 0 else 1e-10
+    ds   = max(ds, abs(m), 1e-10)
+    return float(np.clip(m / ds * math.sqrt(periods_per_year), -20, 20))
+
+
+def calc_max_drawdown(cum_pnl: np.ndarray) -> float:
+    peak = np.maximum.accumulate(cum_pnl)
+    return float((peak - cum_pnl).max())
+
+
+def calc_calmar(cum_pnl: np.ndarray, periods_per_year: int = _H1_PER_YEAR) -> float:
+    """Calmar = 年化收益 / 最大回撤。"""
+    T      = len(cum_pnl)
+    ann    = cum_pnl[-1] * periods_per_year / T if T > 0 else 0
+    mdd    = calc_max_drawdown(cum_pnl)
+    return float(ann / mdd) if mdd > 1e-8 else 0.0
+
+
+# ── 资金曲线图 ────────────────────────────────────────────────────────────────
+
+def plot_equity_curves(results_map: dict, output_dir: str, times_arr: np.ndarray | None = None):
+    """绘制各品种 + 等权组合的资金曲线。
+
+    Args:
+        results_map: {symbol: {"pnl": np.array, "cum_pnl": np.array, ...}}
+        output_dir:  输出目录
+        times_arr:   时间戳数组（Unix秒），用于 X 轴刻度
+    """
+    Path(output_dir).mkdir(parents=True, exist_ok=True)
+    syms   = list(results_map.keys())
+    n_syms = len(syms)
+
+    fig = plt.figure(figsize=(18, 10), dpi=110)
+    gs  = gridspec.GridSpec(2, 1, height_ratios=[3, 1], hspace=0.12)
+    ax_eq  = fig.add_subplot(gs[0])   # 资金曲线
+    ax_dd  = fig.add_subplot(gs[1], sharex=ax_eq)   # 组合回撤
+
+    colors = ["#1565c0", "#00897b", "#e65100", "#6a1b9a", "#558b2f", "#b71c1c"]
+
+    # 等权组合 PnL
+    all_pnls = np.stack([results_map[s]["pnl"] for s in syms], axis=0)
+    port_pnl = all_pnls.mean(axis=0)
+    port_cum = np.cumsum(port_pnl)
+
+    T = len(port_cum)
+    x = np.arange(T)
+
+    # 各品种曲线
+    for i, sym in enumerate(syms):
+        cum = results_map[sym]["cum_pnl"]
+        ax_eq.plot(x, cum, linewidth=0.8, alpha=0.65, color=colors[i % len(colors)],
+                   label=f"{sym} ({results_map[sym]['sortino']:+.2f})")
+
+    # 组合曲线（加粗）
+    ax_eq.plot(x, port_cum, linewidth=2.2, color="black", label=f"Portfolio ({calc_sortino(port_pnl):+.2f})")
+    ax_eq.axhline(0, color="gray", linewidth=0.5, linestyle="--")
+    ax_eq.fill_between(x, port_cum, 0, where=port_cum >= 0, alpha=0.06, color="#1565c0")
+    ax_eq.fill_between(x, port_cum, 0, where=port_cum < 0,  alpha=0.06, color="#b71c1c")
+    ax_eq.set_ylabel("Cumulative Log Return", fontsize=9)
+    ax_eq.legend(loc="upper left", fontsize=8, framealpha=0.7)
+    ax_eq.grid(alpha=0.25)
+    ax_eq.set_title(
+        f"Multi-Factor Portfolio  |  "
+        f"TotalRet={port_cum[-1]:+.3f}  "
+        f"Sharpe={calc_sharpe(port_pnl):+.2f}  "
+        f"Sortino={calc_sortino(port_pnl):+.2f}  "
+        f"MaxDD={calc_max_drawdown(port_cum):.3f}  "
+        f"Calmar={calc_calmar(port_cum):+.2f}",
+        fontsize=10, pad=6,
+    )
+
+    # 组合回撤
+    peak = np.maximum.accumulate(port_cum)
+    dd   = port_cum - peak
+    ax_dd.fill_between(x, dd, 0, alpha=0.5, color="#b71c1c")
+    ax_dd.axhline(0, color="gray", linewidth=0.5)
+    ax_dd.set_ylabel("Drawdown", fontsize=8)
+    ax_dd.grid(alpha=0.2)
+
+    # X 轴时间刻度
+    if times_arr is not None and len(times_arr) == T:
+        from datetime import datetime, timezone
+        step  = max(1, T // 10)
+        ticks = x[::step]
+        labels = [
+            datetime.fromtimestamp(int(times_arr[i]), tz=timezone.utc).strftime("%y-%m-%d")
+            for i in range(0, T, step)
+        ]
+        ax_dd.set_xticks(ticks)
+        ax_dd.set_xticklabels(labels[:len(ticks)], fontsize=7, rotation=20)
+    plt.setp(ax_eq.get_xticklabels(), visible=False)
+
+    path = str(Path(output_dir) / "portfolio_equity.png")
+    fig.savefig(path, bbox_inches="tight")
+    plt.close(fig)
+    print(f"  资金曲线图已保存 → {path}")
+    return path
+
+
+# ── 主流程 ────────────────────────────────────────────────────────────────────
+
 def main():
-    OUTPUT_DIR = "backtest_output"
+    OUTPUT_DIR  = "backtest_output"
     single_mode = "--single" in sys.argv
 
-    # ── 1. 加载各品种策略 ─────────────────────────────────────────────
-    print(f"\n{'='*60}")
+    # ── 1. 获取真实点差 ──────────────────────────────────────────────
+    print("\n获取实时点差...")
+    cost_rates = get_live_spreads()
+    for sym, c in cost_rates.items():
+        print(f"  {sym:12s}: cost_rate={c:.6f}")
+
+    # ── 2. 加载各品种策略 ─────────────────────────────────────────────
+    print(f"\n{'='*62}")
     if single_mode:
-        # 兼容旧的单公式模式
         data = load_strategy(Path(Config.STRATEGY_FILE))
         if data is None:
-            print(f"[ERROR] 找不到: {Config.STRATEGY_FILE}")
-            sys.exit(1)
-        formula = data["formula"]
-        symbol_formulas = {sym: formula for sym in Config.SYMBOLS}
-        print(f"  模式: 单公式（所有品种共用）")
-        print(f"  公式: {decode_formula(formula)}")
+            print(f"[ERROR] 找不到: {Config.STRATEGY_FILE}"); sys.exit(1)
+        symbol_formulas = {sym: data["formula"] for sym in Config.SYMBOLS}
+        print("  模式: 单公式（所有品种共用）")
     else:
-        # 多因子模式：每品种独立公式
         symbol_formulas = {}
-        missing = []
         for sym in Config.SYMBOLS:
             path = Path("strategies") / f"best_{sym}.json"
             data = load_strategy(path)
             if data is None:
-                missing.append(sym)
+                print(f"  [缺失] {sym}")
                 continue
-            # vocab_version 校验
             ver = data.get("vocab_version", "unknown")
             if ver != VOCAB_VERSION:
-                print(f"  [警告] {sym}: vocab_version={ver} 与当前 {VOCAB_VERSION} 不符，跳过")
+                print(f"  [跳过] {sym}: vocab_version 不符 ({ver} vs {VOCAB_VERSION})")
                 continue
             symbol_formulas[sym] = data["formula"]
-            print(f"  {sym}: {decode_formula(data['formula'])}  (score={data.get('best_score', 'N/A')})")
+            sc = data.get("best_score", "N/A")
+            print(f"  {sym}: score={sc:.3f}  {decode_formula(data['formula'])}")
 
-        if missing:
-            print(f"  [缺失策略] {missing}，这些品种将跳过")
-        if not symbol_formulas:
-            print("[ERROR] 没有找到任何有效策略文件，请先运行 main.py 训练")
-            sys.exit(1)
+    if not symbol_formulas:
+        print("[ERROR] 没有有效策略，请先运行 main.py"); sys.exit(1)
+    print(f"{'='*62}\n")
 
-    print(f"{'='*60}\n")
-
-    # ── 2. 加载数据 ───────────────────────────────────────────────────
+    # ── 3. 加载数据 ───────────────────────────────────────────────────
     print("正在连接 MT5 并拉取数据...")
     with MT5DataFetcher() as fetcher:
         mgr = MT5DataManager(fetcher)
@@ -93,95 +234,141 @@ def main():
         raw_dict  = mgr.raw_dict
         syms      = mgr.symbols
         T         = raw_dict["open"].shape[1]
+        times_all = raw_dict.get("time", None)
         print(f"  品种: {syms}  T={T} bars\n")
 
-        # ── 3. 为每个品种计算因子并跑回测 ──────────────────────────
-        print("运行回测引擎（多因子模式）...")
+        # ── 4. 为每品种计算因子 + 回测 ───────────────────────────────
         vm   = StackVM()
         feat = MT5FeatureEngineer.compute_features(raw_dict)  # [N, F, T]
 
-        results = []
+        results_map = {}
+        backtest_results = []
+
         for i, sym in enumerate(syms):
             if sym not in symbol_formulas:
-                print(f"  [跳过] {sym}（无策略文件）")
+                print(f"  [跳过] {sym}（无策略）")
                 continue
 
-            formula = symbol_formulas[sym]
-            # 单品种因子计算（只取第 i 行）
-            feat_i   = feat[i:i+1]          # [1, F, T]
-            raw_i    = {k: v[i:i+1] for k, v in raw_dict.items()}  # [1, T]
+            formula   = symbol_formulas[sym]
+            cost_rate = cost_rates.get(sym, 0.0001)
+            feat_i    = feat[i:i+1]
+            raw_i     = {k: v[i:i+1] for k, v in raw_dict.items()}
 
-            engine = BacktestEngine(formula=formula)
-            sym_results = engine.run(raw_i, feat_i, [sym])
-            results.extend(sym_results)
+            # 用真实点差运行 BacktestEngine
+            engine    = BacktestEngine(formula=formula, cost_rate=cost_rate)
+            sym_res   = engine.run(raw_i, feat_i, [sym])
+            backtest_results.extend(sym_res)
 
-    # ── 4. 打印统计 ────────────────────────────────────────────────────
-    # 为每个结果补充公式信息，用于报告
-    for r in results:
-        sym = r.symbol
-        formula = symbol_formulas.get(sym, [])
-        readable = decode_formula(formula)
-        print(f"\n{'─'*50}")
-        print(f"  {sym}: {readable}")
-        print(f"{'─'*50}")
-        print(f"  Sortino={r.sortino:+.4f}  PnL={r.total_return:+.4f}"
-              f"  Trades={r.n_trades}  WinRate={r.win_rate:.1%}"
-              f"  AvgHold={r.avg_hold_bars:.1f}bars  MaxDD={r.max_drawdown:.4f}")
+            r = sym_res[0]
+            pnl_arr = r.pnl
+            cum_arr = r.cum_pnl
+            sharpe  = calc_sharpe(pnl_arr)
+            sortino = calc_sortino(pnl_arr)
+            mdd     = calc_max_drawdown(cum_arr)
+            calmar  = calc_calmar(cum_arr)
 
-    # ── 5. 组合级汇总 ──────────────────────────────────────────────────
-    print(f"\n{'='*60}")
-    print("  组合级汇总")
-    print(f"{'='*60}")
-    total_pnl   = sum(r.total_return for r in results)
-    n_positive  = sum(1 for r in results if r.total_return > 0)
-    n_sortino_p = sum(1 for r in results if r.sortino > 0)
-    avg_hold    = sum(r.avg_hold_bars for r in results) / len(results) if results else 0
-    print(f"  全品种总 PnL       : {total_pnl:+.4f}")
-    print(f"  正收益品种数       : {n_positive}/{len(results)}")
-    print(f"  Sortino>0 品种数   : {n_sortino_p}/{len(results)}")
-    print(f"  全品种平均持仓     : {avg_hold:.1f} bars")
-    if results:
-        best  = max(results, key=lambda r: r.sortino)
-        worst = min(results, key=lambda r: r.sortino)
-        print(f"  最佳品种           : {best.symbol} (Sortino={best.sortino:.2f})")
-        print(f"  最差品种           : {worst.symbol} (Sortino={worst.sortino:.2f})")
-        consistency_ok = n_sortino_p >= len(results) * 0.6
-        print(f"  品种一致性(>=60%)  : {'PASS' if consistency_ok else 'FAIL'}")
-    print(f"{'='*60}")
+            results_map[sym] = {
+                "pnl":          pnl_arr,
+                "cum_pnl":      cum_arr,
+                "total_return": r.total_return,
+                "sharpe":       sharpe,
+                "sortino":      sortino,
+                "max_drawdown": mdd,
+                "calmar":       calmar,
+                "n_trades":     r.n_trades,
+                "win_rate":     r.win_rate,
+                "avg_hold":     r.avg_hold_bars,
+                "cost_rate":    cost_rate,
+            }
 
-    # ── 6. 保存 JSON 报告 ─────────────────────────────────────────────
+    # ── 5. 打印各品种统计 ─────────────────────────────────────────────
+    print(f"\n{'='*62}")
+    print(f"  多因子回测报告（真实点差）")
+    print(f"{'='*62}")
+    header = f"{'品种':12s} {'PnL':>8} {'Sharpe':>8} {'Sortino':>8} {'MaxDD':>8} {'Calmar':>8} {'Trades':>7} {'WinRate':>8} {'AvgH':>6}"
+    print(f"  {header}")
+    print(f"  {'─'*80}")
+    for sym, d in results_map.items():
+        print(f"  {sym:12s} "
+              f"{d['total_return']:+8.3f} "
+              f"{d['sharpe']:+8.3f} "
+              f"{d['sortino']:+8.3f} "
+              f"{d['max_drawdown']:8.3f} "
+              f"{d['calmar']:+8.2f} "
+              f"{d['n_trades']:7d} "
+              f"{d['win_rate']:8.1%} "
+              f"{d['avg_hold']:6.1f}h")
+
+    # 等权组合
+    if results_map:
+        all_pnls = np.stack([d["pnl"] for d in results_map.values()], axis=0)
+        port_pnl = all_pnls.mean(axis=0)
+        port_cum = np.cumsum(port_pnl)
+        p_sharpe  = calc_sharpe(port_pnl)
+        p_sortino = calc_sortino(port_pnl)
+        p_mdd     = calc_max_drawdown(port_cum)
+        p_calmar  = calc_calmar(port_cum)
+        print(f"  {'─'*80}")
+        print(f"  {'Portfolio':12s} "
+              f"{port_cum[-1]:+8.3f} "
+              f"{p_sharpe:+8.3f} "
+              f"{p_sortino:+8.3f} "
+              f"{p_mdd:8.3f} "
+              f"{p_calmar:+8.2f}")
+        print(f"\n  正收益品种: {sum(1 for d in results_map.values() if d['total_return']>0)}/{len(results_map)}")
+        print(f"  Sharpe>1 品种: {sum(1 for d in results_map.values() if d['sharpe']>1)}/{len(results_map)}")
+    print(f"{'='*62}\n")
+
+    # ── 6. 资金曲线图 ─────────────────────────────────────────────────
     Path(OUTPUT_DIR).mkdir(parents=True, exist_ok=True)
-    report_data = {
-        "mode": "single_formula" if single_mode else "multi_factor",
-        "symbols": {},
-    }
-    for r in results:
-        formula = symbol_formulas.get(r.symbol, [])
-        report_data["symbols"][r.symbol] = {
-            "formula": formula,
-            "readable": decode_formula(formula),
-            "sortino": round(r.sortino, 4),
-            "total_return": round(r.total_return, 6),
-            "max_drawdown": round(r.max_drawdown, 6),
-            "n_trades": r.n_trades,
-            "win_rate": round(r.win_rate, 4),
-            "avg_hold_bars": round(r.avg_hold_bars, 2),
-        }
-    report_path = f"{OUTPUT_DIR}/multi_factor_report.json"
-    with open(report_path, "w") as f:
-        json.dump(report_data, f, indent=2, ensure_ascii=False)
-    print(f"\n  JSON 报告已保存 → {report_path}")
+    if results_map:
+        times_np = times_all[0].numpy() if times_all is not None else None
+        plot_equity_curves(results_map, OUTPUT_DIR, times_np)
 
-    # ── 7. 生成图表 ────────────────────────────────────────────────────
-    print("\n生成图表...")
+    # ── 7. K 线 + 交易图 ─────────────────────────────────────────────
+    print("生成 K 线图（最近 120 根）...")
     chart = BacktestChart(max_bars=120)
-    chart.plot_all(results, output_dir=OUTPUT_DIR)
-    for r in results:
+    chart.plot_all(backtest_results, output_dir=OUTPUT_DIR)
+    for r in backtest_results:
         saved = chart.plot_all_trade_zooms(r, output_dir=OUTPUT_DIR,
-                                           pre_bars=25, post_bars=12, max_trades=10)
+                                           pre_bars=25, post_bars=12, max_trades=8)
         print(f"  {r.symbol}: {len(saved)} 张缩放图")
 
-    print(f"\n全部图表已保存至 {OUTPUT_DIR}/\n")
+    # ── 8. 保存 JSON 报告 ─────────────────────────────────────────────
+    report = {
+        "mode": "single" if single_mode else "multi_factor",
+        "cost_rates": cost_rates,
+        "symbols": {},
+        "portfolio": {},
+    }
+    for sym, d in results_map.items():
+        formula = symbol_formulas.get(sym, [])
+        report["symbols"][sym] = {
+            "formula":      formula,
+            "readable":     decode_formula(formula),
+            "cost_rate":    d["cost_rate"],
+            "total_return": round(d["total_return"], 6),
+            "sharpe":       round(d["sharpe"], 4),
+            "sortino":      round(d["sortino"], 4),
+            "max_drawdown": round(d["max_drawdown"], 6),
+            "calmar":       round(d["calmar"], 4),
+            "n_trades":     d["n_trades"],
+            "win_rate":     round(d["win_rate"], 4),
+            "avg_hold_bars":round(d["avg_hold"], 2),
+        }
+    if results_map:
+        report["portfolio"] = {
+            "total_return": round(float(port_cum[-1]), 6),
+            "sharpe":       round(p_sharpe, 4),
+            "sortino":      round(p_sortino, 4),
+            "max_drawdown": round(p_mdd, 6),
+            "calmar":       round(p_calmar, 4),
+        }
+    rp = f"{OUTPUT_DIR}/multi_factor_report.json"
+    with open(rp, "w") as f:
+        json.dump(report, f, indent=2, ensure_ascii=False)
+    print(f"\n  JSON 报告已保存 → {rp}")
+    print("完成。\n")
 
 
 if __name__ == "__main__":

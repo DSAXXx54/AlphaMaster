@@ -64,45 +64,75 @@ class MT5StrategyRunner:
     """
 
     def __init__(self) -> None:
-        strategy_path = Config.STRATEGY_FILE
-        if not os.path.exists(strategy_path):
-            logger.critical(
-                f"Strategy file '{strategy_path}' not found. "
-                "Please run main.py to train first."
-            )
-            sys.exit(1)
+        from model_core.vocab import VOCAB_VERSION as _CURRENT_VER
+        from pathlib import Path as _Path
 
-        try:
-            with open(strategy_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.critical(f"Failed to load strategy '{strategy_path}': {exc}")
-            sys.exit(1)
+        # ── 加载策略：优先多因子（每品种独立），回退到单公式 ──────────
+        self.symbol_formulas: dict[str, list[int]] = {}
 
-        if isinstance(data, list):
-            logger.critical(
-                "[Runner] Legacy strategy format (plain list) is not supported "
-                "after vocab v2.0. Feature order has changed from 10 to 20 dims. "
-                "Please retrain with the current feature set (python main.py)."
-            )
-            sys.exit(1)
-        elif isinstance(data, dict) and "formula" in data:
-            self.formula = [int(t) for t in data["formula"]]
-            # vocab_version 校验：不一致则拒绝启动，防止特征语义错位
-            from model_core.vocab import VOCAB_VERSION as _CURRENT_VER
-            strategy_ver = data.get("vocab_version", "unknown")
-            if strategy_ver != _CURRENT_VER:
+        # 尝试加载多因子策略
+        strategies_dir = _Path("strategies")
+        for sym in Config.SYMBOLS:
+            path = strategies_dir / f"best_{sym}.json"
+            if not path.exists():
+                continue
+            try:
+                with open(path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, dict) and "formula" in data:
+                    ver = data.get("vocab_version", "unknown")
+                    if ver != _CURRENT_VER:
+                        logger.warning(f"[Runner] {sym}: vocab_version={ver} != {_CURRENT_VER}, skip")
+                        continue
+                    self.symbol_formulas[sym] = [int(t) for t in data["formula"]]
+                    logger.info(f"[Runner] {sym}: 加载多因子策略 {path.name}")
+            except Exception as exc:
+                logger.warning(f"[Runner] {sym}: 加载策略失败 {exc}")
+
+        # 若没有任何多因子策略，回退到单公式
+        if not self.symbol_formulas:
+            strategy_path = Config.STRATEGY_FILE
+            if not os.path.exists(strategy_path):
                 logger.critical(
-                    f"[Runner] vocab_version mismatch: "
-                    f"strategy={strategy_ver}, current={_CURRENT_VER}. "
-                    f"Please retrain with the current feature set."
+                    f"未找到任何策略文件（strategies/best_*.json 或 {strategy_path}）。"
+                    "请先运行 main.py 训练。"
                 )
                 sys.exit(1)
-        else:
-            logger.critical(f"Unexpected strategy format in '{strategy_path}'.")
-            sys.exit(1)
+            try:
+                with open(strategy_path, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+            except (json.JSONDecodeError, OSError) as exc:
+                logger.critical(f"加载策略失败: {exc}")
+                sys.exit(1)
 
-        logger.success(f"[Runner] Strategy loaded: {self.formula}")
+            if isinstance(data, list):
+                logger.critical(
+                    "[Runner] 不支持旧格式策略（vocab v2.0 后特征顺序已变）。"
+                    "请重新训练（python main.py）。"
+                )
+                sys.exit(1)
+            elif isinstance(data, dict) and "formula" in data:
+                ver = data.get("vocab_version", "unknown")
+                if ver != _CURRENT_VER:
+                    logger.critical(
+                        f"[Runner] vocab_version={ver} != {_CURRENT_VER}，请重新训练。"
+                    )
+                    sys.exit(1)
+                formula = [int(t) for t in data["formula"]]
+                # 单公式：所有品种共用
+                for sym in Config.SYMBOLS:
+                    self.symbol_formulas[sym] = formula
+                logger.info(f"[Runner] 使用单公式模式（所有品种共用）")
+            else:
+                logger.critical("策略文件格式不支持。")
+                sys.exit(1)
+
+        logger.success(
+            f"[Runner] 已加载策略: {list(self.symbol_formulas.keys())}"
+        )
+
+        # 兼容旧代码中对 self.formula 的引用（取第一个品种的公式）
+        self.formula = next(iter(self.symbol_formulas.values()))
 
         self.vm        = StackVM()
         self.portfolio = MT5PortfolioManager()
@@ -112,7 +142,6 @@ class MT5StrategyRunner:
         self._fetcher: MT5DataFetcher | None       = None
         self._data_manager: MT5DataManager | None  = None
         self._last_refresh: float                   = 0.0
-        # K 线收盘检测：记录上次调仓时的 bar_time，形状 [N]
         self._last_bar_time: torch.Tensor | None    = None
 
 
@@ -250,40 +279,64 @@ class MT5StrategyRunner:
         return True
 
     def _compute_targets(self) -> torch.Tensor | None:
-        """运行 StackVM 并返回各品种目标仓位 {-1, 0, +1}，形状 [N]。
+        """为每个品种用各自的公式计算目标仓位 {-1, 0, +1}，形状 [N]。
 
-        实盘使用 stateful neutral band：传入当前持仓方向，
-        中间区 [EXIT_THRESHOLD, ENTRY_THRESHOLD] 保持前仓（滞后出场）。
-        这与回测（stateless，中间区直接空仓）有微小差异：
-        回测保守，实盘稍宽松，是有意设计的安全边际。
+        多因子模式：每品种独立运行 StackVM，使用 strategies/best_{sym}.json 中的公式。
+        单公式模式：所有品种共用同一个公式（回退兼容）。
+
+        实盘使用 stateful neutral band（传入当前持仓做滞后出场）。
         """
         if self._data_manager is None:
             return None
         try:
-            feat = self._data_manager.feat_tensor      # [N, F, T]
-            raw  = self.vm.execute(self.formula, feat)  # [N, T] or None
-            if raw is None:
-                logger.error("[Runner] StackVM returned None.")
-                return None
+            from model_core.features import MT5FeatureEngineer
+            raw_dict = self._data_manager.raw_dict
+            symbols  = self._data_manager.symbols
+            N        = len(symbols)
+            feat_all = MT5FeatureEngineer.compute_features(raw_dict)  # [N, F, T]
 
-            latest = raw[:, -1]   # [N]，最新 bar 的因子值
+            targets   = torch.zeros(N, dtype=torch.float32)
+            prev_dirs = torch.zeros(N, dtype=torch.float32)
+            for i, sym in enumerate(symbols):
+                prev_dirs[i] = float(self.portfolio.get_direction(sym))
 
-            if Config.SIGNAL_MODE == "backtest_parity":
-                # 组装当前持仓方向 tensor，用于 neutral band 滞后出场
-                symbols = self._data_manager.symbols
-                prev_dirs = torch.zeros(len(symbols), dtype=torch.float32)
-                for i, sym in enumerate(symbols):
-                    prev_dirs[i] = float(self.portfolio.get_direction(sym))
+            for i, sym in enumerate(symbols):
+                formula = self.symbol_formulas.get(sym)
+                if formula is None:
+                    logger.warning(f"[Runner] {sym}: 无策略公式，保持空仓")
+                    continue
 
-                targets = compute_target_positions(latest, prev_positions=prev_dirs)
-            else:
-                # threshold 模式（旧逻辑，仅做多）
-                scores  = torch.sigmoid(latest)
-                targets = torch.zeros(len(scores), dtype=torch.float32)
-                targets[scores > Config.BUY_THRESHOLD]  =  1.0
-                targets[scores < Config.SELL_THRESHOLD] = -1.0
+                # 只取第 i 个品种的特征
+                feat_i = feat_all[i:i+1]   # [1, F, T]
+                raw_i  = self.vm.execute(formula, feat_i)   # [1, T] or None
+                if raw_i is None:
+                    logger.error(f"[Runner] {sym}: StackVM 返回 None")
+                    continue
 
+                latest_i = raw_i[0, -1]   # 标量：最新 bar 因子值
+
+                if Config.SIGNAL_MODE == "backtest_parity":
+                    prev_i = prev_dirs[i:i+1]
+                    tgt_i  = compute_target_positions(
+                        latest_i.unsqueeze(0), prev_positions=prev_i
+                    )
+                    targets[i] = tgt_i[0]
+                else:
+                    score = torch.sigmoid(latest_i)
+                    if score > Config.BUY_THRESHOLD:
+                        targets[i] =  1.0
+                    elif score < Config.SELL_THRESHOLD:
+                        targets[i] = -1.0
+
+            logger.info(
+                f"[Runner] targets: " +
+                " | ".join(
+                    f"{sym}={int(targets[i].item()):+d}"
+                    for i, sym in enumerate(symbols)
+                )
+            )
             return targets.float()
+
         except Exception as exc:
             logger.error(f"[Runner] _compute_targets failed: {exc}")
             return None
@@ -470,13 +523,56 @@ class MT5StrategyRunner:
     # ──────────────────────────────────────────────────────────────────────
 
     def _calc_lot(self, symbol: str) -> float:
-        """计算手数（复用 MT5RiskEngine）。"""
+        """基于 ATR 波动率目标计算手数，让各品种盈亏金额均衡。
+
+        使用最新 14-bar ATR 作为波动参考，目标每笔 1个ATR波动 = equity × RISK_PER_TRADE。
+        这样黄金、纳指、美日的每笔风险敞口在账户货币层面是相同的。
+        """
         account = self.trader.get_account_info()
         if account is None:
             return 0.0
-        equity    = account["equity"]
-        stop_pips = 20.0   # 通用保守估计；可由品种规格动态获取
-        return self.risk.calculate_lot(symbol, equity, stop_pips)
+        equity = account["equity"]
+
+        # 从当前数据中取该品种最近 14 根 K 线的 ATR
+        atr_price = self._get_atr(symbol)
+        if atr_price is None or atr_price <= 0:
+            # ATR 获取失败：回退到最小手数，避免不交易
+            logger.warning(f"[_calc_lot] {symbol}: ATR 获取失败，使用最小手数")
+            try:
+                import MetaTrader5 as mt5
+                info = mt5.symbol_info(symbol)
+                return info.volume_min if info else 0.01
+            except Exception:
+                return 0.01
+
+        max_lot = getattr(Config, "MAX_LOT_PER_TRADE", 0.1)
+        lot = self.risk.calculate_lot_by_atr(
+            symbol=symbol,
+            equity=equity,
+            atr_price=atr_price,
+            max_lot=max_lot,
+        )
+        return lot
+
+    def _get_atr(self, symbol: str, period: int = 14) -> float | None:
+        """从已加载数据中读取该品种最近 period 根 K 线的 ATR。"""
+        if self._data_manager is None:
+            return None
+        try:
+            raw   = self._data_manager.raw_dict
+            syms  = self._data_manager.symbols
+            if symbol not in syms:
+                return None
+            idx   = syms.index(symbol)
+            hi    = raw["high"][idx, -period:].float()
+            lo    = raw["low"][idx,  -period:].float()
+            cl    = raw["close"][idx, -period:].float()
+            # 简化 ATR：high-low 均值（因果，不看前一根收盘）
+            atr   = (hi - lo).mean().item()
+            return atr
+        except Exception as exc:
+            logger.warning(f"[_get_atr] {symbol}: {exc}")
+            return None
 
     def _get_price(self, symbol: str) -> float:
         """获取当前中间价，失败返回 0.0。"""

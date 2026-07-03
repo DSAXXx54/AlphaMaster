@@ -18,7 +18,7 @@ class ModelConfig:
     #   MAX_FORMULA_LEN=14，TRAIN_STEPS=500，ELITE_REPLAY_FRAC=0.35
     #   目标：围绕好公式附近做组合增强
     BATCH_SIZE      = 128
-    TRAIN_STEPS     = 300   # 每品种训练步数（多因子模式下每品种独立跑）
+    TRAIN_STEPS     = 800   # 每品种训练步数（多因子模式下每品种独立跑）
     MAX_FORMULA_LEN = 8     # 阶段B改为 14
 
     # ── 特征维度（由 vocab.py 自动派生，无需手动修改）──────────────────

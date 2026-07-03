@@ -42,13 +42,36 @@ class Config:
     MT5_SERVER   = os.getenv("MT5_SERVER", "")
 
     # ── 品种与周期 ────────────────────────────────────────
+    # TRADE_SYMBOLS：实际交易的品种（用于生成信号和下单）
     SYMBOLS   = ["EURUSDm", "USDJPYm", "XAUUSDm", "USTECm", "US500m"]
-    TIMEFRAME = mt5.TIMEFRAME_H1   # 可通过 get_timeframe() 修改
+
+    # FEATURE_SYMBOLS：用于计算截面特征的宽品种集
+    # 包含主要外汇、贵金属、大宗商品、主流指数，时间与 SYMBOLS 高度对齐
+    # REL_RET5/REL_RET20/REL_VOL 等跨资产特征将基于这 40 个品种计算截面均值
+    # 若设为 None，则退化为只用 SYMBOLS（5品种截面）
+    FEATURE_SYMBOLS = [
+        # 主要外汇（24个）
+        "EURUSDm", "GBPUSDm", "AUDUSDm", "NZDUSDm", "USDCADm", "USDCHFm",
+        "USDJPYm", "EURJPYm", "GBPJPYm", "AUDJPYm", "EURGBPm", "EURAUDm",
+        "EURCADm", "EURCHFm", "GBPAUDm", "GBPCADm", "GBPCHFm",
+        "AUDCADm", "AUDCHFm", "AUDNZDm", "NZDCADm", "NZDCHFm", "NZDJPYm",
+        "CADCHFm", "CADJPYm", "CHFJPYm",
+        # 贵金属（3个）
+        "XAUUSDm", "XAGUSDm", "XPTUSDm",
+        # 美元指数（1个）
+        "DXYm",
+        # 大宗商品（2个）
+        "USOILm", "UKOILm",
+        # 主流指数（8个）
+        "US30m", "US500m", "USTECm", "UK100m", "DE30m", "FR40m", "JP225m", "AUS200m",
+    ]
 
     # ── 数据参数 ──────────────────────────────────────────
-    BARS_COUNT            = 12000  # 每品种拉取的历史 K 线数（5品种需更多数据）
+    TIMEFRAME             = mt5.TIMEFRAME_H1   # K 线周期
+    BARS_COUNT            = 12000  # 每品种拉取的历史 K 线数
     MIN_BARS              = 3000   # 低于此值的品种被排除
     DATA_REFRESH_INTERVAL = 300    # 秒，实盘数据刷新间隔
+    KLINE_CACHE_DIR       = r"D:\K线数据"  # 本地 K 线缓存目录
 
     # ── 模型参数（仅供参考，训练实际使用 model_core.config.ModelConfig）────
     # 训练参数的权威来源是 model_core/config.py，这里的值不生效
@@ -63,9 +86,10 @@ class Config:
     )
 
     # ── 风控参数 ──────────────────────────────────────────
-    RISK_PER_TRADE     = 0.01      # 每笔风险敞口（账户净值的 1%）
+    RISK_PER_TRADE     = 0.001     # 每笔风险敞口（账户净值的 0.1%，保守起步）
     COST_RATE          = 0.0001    # 单边点差+佣金（forex/metals）
-    MAX_OPEN_POSITIONS = 3
+    MAX_OPEN_POSITIONS = 4         # 最多同时持仓品种数
+    MAX_LOT_PER_TRADE  = 0.1       # 单笔最大手数硬性上限（防止计算异常放大）
 
     # ── 策略参数 ──────────────────────────────────────────
     # SIGNAL_MODE 控制信号→仓位的转换方式：
