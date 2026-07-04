@@ -624,9 +624,19 @@ class AlphaEngine:
                                    f"全参数扰动(σ={noise})")
                     self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
                 else:
-                    tqdm.write(f"[Early Stop] 已重启{max_r}次仍坍塌，"
-                               f"H={ent_val:.3f}，终止。")
-                    break
+                    # 训练时间不敏感：超过重启上限后不再 Early Stop 终止，
+                    # 改为「全参数强扰动 + 重置流计数」继续探索，直到跑满 TRAIN_STEPS。
+                    # 从 best_snapshot 恢复（若有）以保住已发现的最优结构，再加大扰动。
+                    low_entropy_streak = 0
+                    hard_noise = ModelConfig.RESTART_NOISE * 2.0
+                    if self._best_snapshot is not None:
+                        self.model.load_state_dict(self._best_snapshot)
+                    with torch.no_grad():
+                        for p in self.model.parameters():
+                            p.add_(torch.randn_like(p) * hard_noise)
+                    self.opt = torch.optim.AdamW(self.model.parameters(), lr=1e-3)
+                    tqdm.write(f"[Hard Restart] 已重启{max_r}次仍坍塌，"
+                               f"H={ent_val:.3f}，强扰动(σ={hard_noise})继续，不终止。")
 
         # ── End of training ──────────────────────────────────────────
         if self.best_formula is not None:

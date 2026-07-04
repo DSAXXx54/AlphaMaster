@@ -1422,7 +1422,30 @@ _FEATURE_DEFS = [
     ("CS_ZSCORE_RET20", "cross_sectional", _fe._c_cs_zscore_ret20),
 ]
 
+# ── 激活特征白名单（特征剪枝机制，2026-07-04）──────────────────────────
+# 若项目根目录存在 active_features.json（由 prune_features.py 生成），
+# 则只注册白名单内的特征，缩小 vocab 与搜索空间；否则注册全部 65 个特征。
+# 白名单按 _FEATURE_DEFS 原始顺序过滤，保持特征维顺序稳定。
+def _load_active_feature_allowlist() -> set[str] | None:
+    import json as _json
+    import pathlib as _pathlib
+    _path = _pathlib.Path(__file__).resolve().parent.parent / "active_features.json"
+    if not _path.exists():
+        return None
+    try:
+        data = _json.loads(_path.read_text(encoding="utf-8"))
+        names = data.get("active_features") if isinstance(data, dict) else data
+        allow = {str(n) for n in names}
+        return allow or None
+    except Exception:
+        return None
+
+
+_ACTIVE_FEATURES = _load_active_feature_allowlist()
+
 for _name, _category, _compute in _FEATURE_DEFS:
+    if _ACTIVE_FEATURES is not None and _name not in _ACTIVE_FEATURES:
+        continue
     FEATURE_REGISTRY.register_feature(
         FeatureSpec(name=_name, category=_category, compute=_compute)
     )

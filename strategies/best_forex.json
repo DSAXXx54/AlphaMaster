@@ -1,15 +1,15 @@
 {
-  "vocab_version": "v6ff4c52e30c1",
+  "vocab_version": "v61d94be3d0e5",
   "symbol": "forex",
   "formula": [
-    40,
-    51,
-    81,
-    83,
-    86,
-    125,
-    88,
-    125
+    16,
+    77,
+    77,
+    23,
+    75,
+    77,
+    71,
+    78
   ],
-  "best_score": 6.635913372039795
+  "best_score": 5.444646835327148
 }

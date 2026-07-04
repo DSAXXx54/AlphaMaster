@@ -4,6 +4,8 @@ model_core/config.py — 模型层配置
 仅保留模型训练所需的参数。
 品种、数据、风控等全局配置统一由根目录 config.py 的 Config 类管理。
 """
+import math
+
 import torch
 from .vocab import FORMULA_VOCAB
 
@@ -26,15 +28,17 @@ class ModelConfig:
     # 若后续改为批量并行公式评估（一次喂大批张量进 GPU），再切回 cuda。
     DEVICE = torch.device("cpu")
 
-    # ── 训练参数（阶段 A：找简单稳定公式）────────────────────────────────
-    # 阶段 A（当前）：MAX_FORMULA_LEN=8，TRAIN_STEPS=300
-    #   目标：找简单、稳定、低换手的基础公式，防过拟合
-    # 阶段 B（完成阶段A后切换）：
-    #   MAX_FORMULA_LEN=14，TRAIN_STEPS=500，ELITE_REPLAY_FRAC=0.35
-    #   目标：围绕好公式附近做组合增强
-    BATCH_SIZE      = 128
-    TRAIN_STEPS     = 3000  # 每品种训练步数（多因子模式下每品种独立跑）
-    MAX_FORMULA_LEN = 8     # 阶段B改为 14
+    # ── 训练参数（大搜索空间适配版，2026-07-04 重构）─────────────────────
+    # 背景：特征库扩展到 65、算子库扩展到 66（vocab=131），8-token 搜索空间
+    #   从旧版 ~7亿 暴增到 ~8.67×10^16（1.2 亿倍）。旧的采样预算（128×3000）
+    #   覆盖率趋近于零，导致熵坍塌 Early Stop、公式退化。
+    # 对策（训练时间不敏感场景）：
+    #   1. 特征剪枝（active_features.json）把 vocab 降到 ~90，空间缩小约 20 倍
+    #   2. 放大采样预算：BATCH_SIZE 128→256，TRAIN_STEPS 3000→8000
+    #   3. 更大精英池（60）保留更多历史最优
+    BATCH_SIZE      = 192   # 每步采样公式数（原 128，1.5x 提升覆盖率）
+    TRAIN_STEPS     = 5000  # 每组训练步数（原 3000）
+    MAX_FORMULA_LEN = 8     # 公式长度上限（暂保持 8，防过拟合）
 
     # ── 特征维度（由 vocab.py 自动派生，无需手动修改）──────────────────
     INPUT_DIM: int = FORMULA_VOCAB.feature_count  # == 10
@@ -45,20 +49,26 @@ class ModelConfig:
     IC_GATE_MULT:      float = 1.15
     IC_NEG_MULT:       float = 0.85
 
-    # ── 熵保护 ─────────────────────────────────────────────────────────
-    ENTROPY_COEFF_MAX:   float = 0.50
+    # ── 熵保护（大空间加强版）──────────────────────────────────────────
+    # ENTROPY_COEFF_MAX 0.5→1.0：加倍探索压力，对抗大 vocab 的过早收敛。
+    # ENTROPY_COLLAPSE_THRESH 改为相对阈值 0.15×ln(vocab)：大 vocab 最大熵更高
+    #   （ln(131)≈4.87 vs ln(54)≈3.99），绝对阈值 0.5 不再合理。
+    # ENTROPY_COLLAPSE_STEPS 15→40：给模型更长的自我恢复窗口，不急于重启。
+    ENTROPY_COEFF_MAX:   float = 1.0
     ENTROPY_COEFF_POWER: float = 1.3
-    ENTROPY_COLLAPSE_THRESH: float = 0.5
-    ENTROPY_COLLAPSE_STEPS:  int   = 15
+    ENTROPY_COLLAPSE_THRESH: float = 0.15 * math.log(FORMULA_VOCAB.size)
+    ENTROPY_COLLAPSE_STEPS:  int   = 40
 
     # ── Elite Replay ──────────────────────────────────────────────────
-    ELITE_REPLAY_FRAC:  float = 0.25   # 阶段A；阶段B改为 0.35
-    ELITE_POOL_SIZE:    int   = 30
+    ELITE_REPLAY_FRAC:  float = 0.25
+    ELITE_POOL_SIZE:    int   = 60    # 30→60：大空间需要更大的精英记忆
     ELITE_REWARD_SCALE: float = 1.2
 
-    # ── 坍塌重启 ───────────────────────────────────────────────────────
-    MAX_RESTARTS:   int   = 8
-    RESTART_NOISE:  float = 0.05
+    # ── 坍塌重启（大空间加强版）─────────────────────────────────────────
+    # MAX_RESTARTS 8→25、RESTART_NOISE 0.05→0.1：时间不敏感，多给机会+更强扰动。
+    # 配合 engine.py：超过 MAX_RESTARTS 后不再 Early Stop，改为强扰动继续训练。
+    MAX_RESTARTS:   int   = 25
+    RESTART_NOISE:  float = 0.1
 
     # ── 因子去相关参数 ────────────────────────────────────────────────
     FACTOR_TOP_K:     int   = 10
