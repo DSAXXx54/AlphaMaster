@@ -77,7 +77,7 @@ class ModelConfig:
     # MAX_RESTARTS 8→25、RESTART_NOISE 0.05→0.1：时间不敏感，多给机会+更强扰动。
     # 配合 engine.py：超过 MAX_RESTARTS 后不再 Early Stop，改为强扰动继续训练。
     MAX_RESTARTS:   int   = 25
-    RESTART_NOISE:  float = 0.1
+    RESTART_NOISE:  float = 0.25
 
     # ── 自适应噪声：Best 停滞时自动增大扰动 ─────────────────────────────
     # stagnation_window: 判断停滞的步数窗口
@@ -85,17 +85,17 @@ class ModelConfig:
     # noise_boost: 停滞时噪声提升倍率
     ADAPTIVE_NOISE:      bool  = True
     STAGNATION_WINDOW:   int   = 500
-    NOISE_MIN:           float = 0.05
-    NOISE_MAX:           float = 0.40
-    NOISE_BOOST_FACTOR:  float = 1.0   # noise += 0.1 * (stagnation / window)
+    NOISE_MIN:           float = 0.15
+    NOISE_MAX:           float = 0.60
+    NOISE_BOOST_FACTOR:  float = 2.0   # noise += 0.2 * (stagnation / window)
 
     # ── 重启时部分重置参数：保留底层，扰动顶层 ───────────────────────────
     PARTIAL_RESET:       bool  = True
-    PARTIAL_RESET_LAYERS: tuple = ("ln_f", "mtp_head", "head_critic")
+    PARTIAL_RESET_LAYERS: tuple = ("ln_f", "mtp_head", "head_critic", "blocks", "token_emb")
 
     # ── Elite Replay 衰减：旧 elite 采样权重随时间衰减 ──────────────────
     ELITE_DECAY:         bool  = True
-    ELITE_DECAY_HALF_LIFE: int = 1000  # 每 1000 步旧 elite 权重减半
+    ELITE_DECAY_HALF_LIFE: int = 300   # 每 300 步旧 elite 权重减半
 
     # ── 多起点并行（Island）──────────────────────────────────────────────
     # 注意：Island 模式在 CPU 训练下会让总时间变成 N 倍（islands 串行），

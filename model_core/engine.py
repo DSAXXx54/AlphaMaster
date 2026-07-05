@@ -1,10 +1,13 @@
 import copy
 import heapq
 import json
+import math
 import pathlib
 import random
+import sys
 
 import torch
+import torch.nn.functional as F
 from torch.distributions import Categorical
 from tqdm import tqdm
 
@@ -314,6 +317,42 @@ class AlphaEngine:
             reward = reward * ModelConfig.CORR_PENALTY
         return reward
 
+    def _distribution_stats(self, prev_dist=None):
+        """计算模型初始位置（zero prefix）token 分布的细化指标，用于判断 H 不变时
+        分布是否真的在变化。
+        """
+        vocab_size = FORMULA_VOCAB.size
+        with torch.no_grad():
+            inp = torch.zeros((1, 1), dtype=torch.long,
+                              device=ModelConfig.DEVICE)
+            logits, _, _ = self.model(inp)
+            logits = self.sampler.apply_mask_to_logits(
+                logits, [0], 0, ModelConfig.MAX_FORMULA_LEN
+            )
+            dist = F.softmax(logits, dim=-1).squeeze(0)
+            ent = -(dist * torch.log(dist + 1e-12)).sum().item()
+            log_v = math.log(vocab_size)
+            kl_uniform = log_v - ent
+            top1 = dist.max().item()
+            top5 = dist.topk(5, dim=-1).values.sum().item()
+            eff_vocab = math.exp(ent)
+            prob_std = dist.std(unbiased=False).item()
+            kl_prev = 0.0
+            if prev_dist is not None:
+                kl_prev = (
+                    dist * (torch.log(dist + 1e-12) -
+                            torch.log(prev_dist.to(dist.device) + 1e-12))
+                ).sum().item()
+        return {
+            'dist': dist.cpu(),
+            'entropy': ent,
+            'kl_uniform': kl_uniform,
+            'top1_prob': top1,
+            'top5_prob': top5,
+            'eff_vocab': eff_vocab,
+            'prob_std': prob_std,
+            'kl_prev': kl_prev,
+        }
 
     # ── Main training loop ────────────────────────────────────────────────────
 
@@ -366,10 +405,16 @@ class AlphaEngine:
             print(f"[Train] start_step={start_step} >= end_step={end_step}, nothing to do.")
             return
 
+        # 非交互/重定向输出时关闭 tqdm 进度条，避免进度条刷屏把自定义日志淹掉。
+        # tqdm.write 仍然可用，详细 step 日志会继续输出。
         pbar               = tqdm(range(start_step, end_step),
                                   total=end_step,
-                                  initial=start_step)
+                                  initial=start_step,
+                                  disable=not sys.stderr.isatty(),
+                                  leave=False,
+                                  mininterval=5.0)
         low_entropy_streak = 0
+        prev_init_dist     = None  # 用于计算相邻步分布差异 KL
 
         for step in pbar:
             # ── Part A: Sample n_new new formulas ────────────────────
@@ -602,6 +647,14 @@ class AlphaEngine:
             if self.use_lord:
                 self.lord_opt.step()
 
+            # ── Part D2: 分布细化指标 ────────────────────────────────
+            dst = self._distribution_stats(prev_init_dist)
+            prev_init_dist = dst['dist']
+            with torch.no_grad():
+                uniq_tokens = seqs_new.unique().numel()
+                uniq_fmls   = torch.unique(seqs_new, dim=0).shape[0]
+                fml_div     = uniq_fmls / max(1, n_new)
+
             # ── Part E: Logging & history & checkpoint ───────────────
             avg_rew = rewards.mean().item()
             avg_val = val_scores.mean().item()
@@ -619,10 +672,20 @@ class AlphaEngine:
                 f"Best={self.best_score:.3f} stagnation={self._stagnation_steps} "
                 f"epool={len(self._elite_pool)} restarts={self._restart_count}"
             )
+            tqdm.write(
+                f"   Dist: H0={dst['entropy']:.3f} KLuni={dst['kl_uniform']:.3f} "
+                f"KLprev={dst['kl_prev']:.4f} top1={dst['top1_prob']:.3f} "
+                f"top5={dst['top5_prob']:.3f} effV={dst['eff_vocab']:.2f} "
+                f"std={dst['prob_std']:.4f} | "
+                f"Batch: utok={uniq_tokens}/{FORMULA_VOCAB.size} "
+                f"ufml={uniq_fmls}/{n_new} fdiv={fml_div:.2f}"
+            )
             pbar.set_postfix({
                 'Val': f"{avg_val:.3f}", 'Best': f"{self.best_score:.3f}",
                 'H':   f"{ent_val:.2f}", 'IC':   f"{bim:.4f}",
                 'stag': f"{self._stagnation_steps}",
+                'H0':  f"{dst['entropy']:.2f}",
+                'KLp': f"{dst['kl_prev']:.3f}",
             })
 
             if self.use_lord and step % 10 == 0:
@@ -639,6 +702,14 @@ class AlphaEngine:
             self.training_history.setdefault('sortino', []).append(bsor_)
             self.training_history.setdefault('elite_pool_size', []).append(
                 len(self._elite_pool))
+            self.training_history.setdefault('init_entropy', []).append(dst['entropy'])
+            self.training_history.setdefault('kl_uniform', []).append(dst['kl_uniform'])
+            self.training_history.setdefault('kl_prev', []).append(dst['kl_prev'])
+            self.training_history.setdefault('top1_prob', []).append(dst['top1_prob'])
+            self.training_history.setdefault('eff_vocab', []).append(dst['eff_vocab'])
+            self.training_history.setdefault('batch_uniq_tokens', []).append(uniq_tokens)
+            self.training_history.setdefault('batch_uniq_fmls', []).append(uniq_fmls)
+            self.training_history.setdefault('batch_fml_div', []).append(fml_div)
 
             if self.best_formula is not None:
                 from .vocab import VOCAB_VERSION
