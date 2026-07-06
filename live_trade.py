@@ -37,8 +37,10 @@ from config import Config
 from strategy_manager.runner import MT5StrategyRunner
 from loguru import logger
 
-# ── 默认只交易 forex 组（唯一有效策略的品种）──────────────────────────────────
-_FOREX_SYMBOLS = ["EURUSD", "USDJPY"]
+# ── 默认交易品种：forex 组 + metals_comm 组 ──────────────────────────────────
+# forex 组：forex_v1 + forex_v2（8年数据，充分验证）
+# metals_comm 组：metals_comm_v2（1.37年数据，统计显著性有限，MDD 13.62%）
+_DEFAULT_SYMBOLS = ["EURUSD", "USDJPY", "XAUUSD", "AAVUSD", "COCOA.c"]
 
 
 def main():
@@ -50,13 +52,13 @@ def main():
         idx = sys.argv.index("--symbols")
         sym_override = sys.argv[idx+1:]
 
-    # 默认限定 forex 组品种（index/metals 无有效策略，避免空仓噪声）
+    # 默认限定有效策略品种
     if sym_override:
         Config.SYMBOLS = sym_override
         logger.info(f"[live_trade] 品种覆盖: {Config.SYMBOLS}")
     else:
-        Config.SYMBOLS = _FOREX_SYMBOLS
-        logger.info(f"[live_trade] 使用默认 forex 品种: {Config.SYMBOLS}")
+        Config.SYMBOLS = _DEFAULT_SYMBOLS
+        logger.info(f"[live_trade] 使用默认品种: {Config.SYMBOLS}")
 
     if dry_run:
         logger.info("[live_trade] DRY RUN 模式：只打印信号，不下单")
@@ -65,11 +67,12 @@ def main():
         logger.info("[live_trade] 单公式模式：所有品种共用 best_mt5_strategy.json")
 
     logger.info("=" * 60)
-    logger.info("  AlphaGPT 自动交易启动  [forex 双因子模式]")
+    logger.info("  AlphaGPT 自动交易启动  [多品种多因子模式]")
     logger.info(f"  品种:       {Config.SYMBOLS}")
     logger.info(f"  周期:       H1")
-    logger.info(f"  因子策略:   forex_v1 (archive) + forex_v2 (best_forex)")
-    logger.info(f"  信号合并:   双因子均值（反向时相互抵消，同向时叠加）")
+    logger.info(f"  forex 策略: forex_v1 (archive) + forex_v2 (best_forex)")
+    logger.info(f"  metals 策略: metals_comm_v2 (best_metals_comm)  ⚠️ 仅1.37年数据")
+    logger.info(f"  信号合并:   各品种多公式均值（反向抵消，同向叠加）")
     logger.info(f"  信号模式:   {Config.SIGNAL_MODE}")
     logger.info(f"  出场模式:   {Config.EXIT_MODE}")
     logger.info("=" * 60)

@@ -101,12 +101,19 @@ class MT5StrategyRunner:
                 logger.warning(f"[Runner] {path.name}: 加载失败 {exc}")
                 return None
 
+        # ── 品种分组定义 ─────────────────────────────────────────────
+        forex_group       = ["EURUSD", "USDJPY"]
+        metals_comm_group = ["XAUUSD", "AAVUSD", "COCOA.c"]
+
         # ── 为每品种收集所有有效公式（支持多条）────────────────────
         # 查找顺序：
-        #   1. strategies/best_{sym}.json（per-symbol 主策略）
-        #   2. strategies/best_forex.json（组策略，若品种在 forex 组）
-        #   3. strategies/archive/best_forex_*.json（归档的历史最优版本）
-        forex_group = ["EURUSD", "USDJPY"]
+        #   forex 组：
+        #     1. strategies/best_{sym}.json（per-symbol 主策略）
+        #     2. strategies/best_forex.json（组策略，forex_v2）
+        #     3. strategies/archive/best_forex_*.json（归档，forex_v1）
+        #   metals_comm 组：
+        #     1. strategies/best_{sym}.json（per-symbol 主策略）
+        #     2. strategies/best_metals_comm.json（组策略，metals_comm_v2）
 
         for sym in Config.SYMBOLS:
             formulas_for_sym: list[list[int]] = []
@@ -133,6 +140,11 @@ class MT5StrategyRunner:
             if sym in forex_group:
                 _add(_load_formula(archive_dir / "best_forex_20250705_pre_refactor.json"),
                      "archive_forex_v1")
+
+            # 4. metals_comm 组共享策略（metals_comm_v2）
+            if sym in metals_comm_group:
+                _add(_load_formula(strategies_dir / "best_metals_comm.json"),
+                     "best_metals_comm(v2)")
 
             if formulas_for_sym:
                 self.symbol_formulas_multi[sym] = formulas_for_sym
@@ -240,6 +252,29 @@ class MT5StrategyRunner:
             logger.error(f"[Runner] Initial data load failed: {exc}")
 
         logger.info("[Runner] MT5 connections established. Entering main loop.")
+
+        # ── 启动时立即执行一次调仓（不等下一根 K 线收盘）────────────────
+        # 原因：程序刚启动时持仓状态未知，应立即同步信号与仓位，
+        # 而不是等最多 1 小时才做第一次动作。
+        # 同时初始化 _last_bar_time，避免第一个正常循环被误判为 new_bar。
+        logger.info("[Runner] 启动后立即执行初始调仓...")
+        try:
+            self.portfolio.sync_from_mt5()
+        except Exception as exc:
+            logger.warning(f"[Runner] 初始 portfolio sync 失败: {exc}")
+        if self._data_manager is not None:
+            try:
+                cur_bar_time = self._data_manager.bar_time
+                self._last_bar_time = cur_bar_time.clone()
+            except Exception:
+                pass
+            init_targets = self._compute_targets()
+            if init_targets is not None:
+                try:
+                    self._reconcile_positions(init_targets)
+                    logger.info("[Runner] 初始调仓完成。")
+                except Exception as exc:
+                    logger.error(f"[Runner] 初始调仓失败: {exc}")
 
         while True:
             loop_start = time.time()
