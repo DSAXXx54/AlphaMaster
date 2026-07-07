@@ -2,23 +2,15 @@
 live_trade.py — 自动交易启动脚本
 
 使用方法：
-    python live_trade.py                    # forex 双因子模式（forex_v1 + forex_v2，默认）
+    python live_trade.py                    # XAGUSD + US500 + US100 三品种（默认）
     python live_trade.py --dry-run          # 模拟运行（不下单，只打印信号）
-    python live_trade.py --symbols EURUSD   # 只交易指定品种
+    python live_trade.py --symbols XAGUSD   # 只交易指定品种
     python live_trade.py --single           # 使用 best_mt5_strategy.json 单公式（回退）
 
-已启用的有效策略（forex 双因子）：
-    forex_v1：strategies/archive/best_forex_20250705_pre_refactor.json
-              公式：AROON_OSC_25 → TS_MIN_10 → EMA_20 → CS_SCALE → SIGN → CS_SCALE → EMA_5 → MOMENTUM_5
-              回测：8年，Sharpe 0.879，MDD 7.03%，3折WF全正，2x成本仍盈利
-    forex_v2：strategies/best_forex.json
-              公式：DMI_DIFF_14 → HL_RANGE → TS_MIN_20 → SUB → TS_MIN_20 → TS_MEAN_20 → CS_SCALE → WMA
-              回测：8年，Sharpe 0.684，MDD 6.88%，2x成本仍盈利
-
-信号合并规则：
-    两条因子信号取算术平均（tanh 压缩后）。
-    若两条信号方向相反 → 均值趋近 0 → 不开仓（等待两者达成一致）。
-    若两条信号方向一致 → 均值绝对值更大 → 较大仓位比例。
+当前启用策略（收益优先）：
+    XAGUSD：strategies/best_XAGUSD.json（precious_metals_v1）
+    US500.cash：strategies/best_US500.cash.json（us500_v1）
+    US100.cash：strategies/best_US100.cash.json（us100_v1）
 
 注意：
   - 需要 MT5 终端已登录并允许自动交易
@@ -37,14 +29,11 @@ from config import Config
 from strategy_manager.runner import MT5StrategyRunner
 from loguru import logger
 
-# ── 默认交易品种：forex 组 + metals_comm 组 ──────────────────────────────────
-# forex 组：forex_v1 + forex_v2（8年数据，充分验证）
-# metals_comm 组：metals_comm_v2（1.37年数据，统计显著性有限，MDD 13.62%）
-_DEFAULT_SYMBOLS = ["EURUSD", "USDJPY", "XAUUSD", "AAVUSD", "COCOA.c"]
+# 收益优先：白银 + 标普500 + 纳指100，各用单品种最优因子
+_DEFAULT_SYMBOLS = ["XAGUSD", "US500.cash", "US100.cash"]
 
 
 def main():
-    # 命令行参数处理
     dry_run = "--dry-run" in sys.argv
     single  = "--single"  in sys.argv
     sym_override = None
@@ -52,7 +41,6 @@ def main():
         idx = sys.argv.index("--symbols")
         sym_override = sys.argv[idx+1:]
 
-    # 默认限定有效策略品种
     if sym_override:
         Config.SYMBOLS = sym_override
         logger.info(f"[live_trade] 品种覆盖: {Config.SYMBOLS}")
@@ -67,14 +55,15 @@ def main():
         logger.info("[live_trade] 单公式模式：所有品种共用 best_mt5_strategy.json")
 
     logger.info("=" * 60)
-    logger.info("  AlphaGPT 自动交易启动  [多品种多因子模式]")
+    logger.info("  AlphaGPT 自动交易启动  [XAGUSD + US500 + US100]")
     logger.info(f"  品种:       {Config.SYMBOLS}")
     logger.info(f"  周期:       H1")
-    logger.info(f"  forex 策略: forex_v1 (archive) + forex_v2 (best_forex)")
-    logger.info(f"  metals 策略: metals_comm_v2 (best_metals_comm)  ⚠️ 仅1.37年数据")
-    logger.info(f"  信号合并:   各品种多公式均值（反向抵消，同向叠加）")
+    logger.info(f"  XAGUSD:     best_XAGUSD.json (precious_metals_v1)")
+    logger.info(f"  US500.cash: best_US500.cash.json (us500_v1)")
+    logger.info(f"  US100.cash: best_US100.cash.json (us100_v1)")
     logger.info(f"  信号模式:   {Config.SIGNAL_MODE}")
     logger.info(f"  出场模式:   {Config.EXIT_MODE}")
+    logger.info(f"  单笔风险:   {Config.RISK_PER_TRADE * 100:.1f}% ATR")
     logger.info("=" * 60)
 
     runner = MT5StrategyRunner()

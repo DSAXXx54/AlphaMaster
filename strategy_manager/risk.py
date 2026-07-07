@@ -179,6 +179,23 @@ class MT5RiskEngine:
         # 含义：1个ATR波动时的盈亏 = target_risk_usd
         desired_lot = target_risk_usd / (atr_price * value_per_unit)
 
+        # ── 手数校准：黄金固定，其它品种按系数放大 ─────────────────
+        # 需求：保持黄金始终只下 0.1 手，其它品种按某个系数加大手数。
+        try:
+            xau_fixed = float(getattr(Config, "XAUUSD_FIXED_LOT", 0.10))
+        except Exception:
+            xau_fixed = 0.10
+        try:
+            other_mult = float(getattr(Config, "OTHER_LOT_MULTIPLIER", 1.0))
+        except Exception:
+            other_mult = 1.0
+
+        sym_norm = symbol.upper()
+        if sym_norm.startswith("XAUUSD"):
+            desired_lot = xau_fixed
+        else:
+            desired_lot = desired_lot * other_mult
+
         # 舍入到 volume_step，clamp
         step = symbol_info.volume_step
         lot  = round(desired_lot / step) * step

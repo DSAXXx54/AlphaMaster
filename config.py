@@ -139,6 +139,11 @@ class Config:
     COST_RATE          = 0.0001    # 单边点差+佣金（forex/metals）
     MAX_OPEN_POSITIONS = 4         # 最多同时持仓品种数
     MAX_LOT_PER_TRADE  = 1.0       # 收益优先上限；仍受 MT5 品种规格和保证金约束
+    # 手数校准：
+    # - 黄金（XAUUSD）波动金额显著更大，固定小手数避免整体风险失控
+    # - 其他品种在 ATR 风控手数基础上乘一个系数放大收益弹性
+    XAUUSD_FIXED_LOT   = 0.10
+    OTHER_LOT_MULTIPLIER = 2.0
     MIN_TRADE_EXPOSURE = 0.05      # |tanh(factor)| 小于该值时视为空仓，回测/实盘共用
 
     # ── 策略参数 ──────────────────────────────────────────

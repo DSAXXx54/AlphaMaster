@@ -86,17 +86,20 @@ class MT5StrategyRunner:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                if not isinstance(data, dict) or "formula" not in data:
+                if not isinstance(data, dict):
+                    return None
+                formula = data.get("formula") or data.get("formula_tokens")
+                if not formula:
                     return None
                 ver = data.get("vocab_version", "unknown")
                 if ver != _CURRENT_VER:
                     logger.warning(f"[Runner] {path.name}: vocab_version={ver} != {_CURRENT_VER}, skip")
                     return None
-                score = data.get("best_score", 0.0)
+                score = data.get("best_score") or data.get("train_best_score") or 0.0
                 if score <= 0.0:
                     logger.warning(f"[Runner] {path.name}: best_score={score:.4f} <= 0, skip (invalid strategy)")
                     return None
-                return [int(t) for t in data["formula"]]
+                return [int(t) for t in formula]
             except Exception as exc:
                 logger.warning(f"[Runner] {path.name}: 加载失败 {exc}")
                 return None
@@ -141,7 +144,7 @@ class MT5StrategyRunner:
                 _add(_load_formula(archive_dir / "best_forex_20250705_pre_refactor.json"),
                      "archive_forex_v1")
 
-            # 4. metals_comm 组共享策略（metals_comm_v2）
+            # 4. metals_comm 组共享策略（metals_comm_v2，旧版）
             if sym in metals_comm_group:
                 _add(_load_formula(strategies_dir / "best_metals_comm.json"),
                      "best_metals_comm(v2)")
