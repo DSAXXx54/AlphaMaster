@@ -57,10 +57,35 @@ class Config:
         "JP225.cash",
     ]
 
-    # 相关性分组（用于分组训练）
+    # ── 训练品种（单品种模式）──────────────────────────────
+    # 2026-07-07 从分组模式切换到单品种模式。原因：
+    #   1. 截面信息没用上：precious_metals/index 跑出的4个最优公式，没有一个用了 CS 算子
+    #   2. 跨品种干扰严重：XAUUSD/XAGUSD 同组时，白银 Kyle Lambda 波动是黄金4倍，
+    #      模型被白银主导，黄金信号被淹没
+    #   3. 指数组无效探索：5个美股指数相关性>0.85，截面空间狭窄，19次重启后仍是beta
+    #   4. 单品种策略更纯粹：因子只针对一种资产特征，实盘也更容易管理
+    # 每个品种独立训练，checkpoint 按 ckpt_{symbol}_step_{N}.pt 保存。
+    TRAINABLE_SYMBOLS = [
+        # 外汇（各8年数据，24h连续交易）
+        "EURUSD",
+        "USDJPY",
+        # 贵金属（各8年数据，24h连续交易）
+        "XAUUSD",
+        "XAGUSD",
+        # 美国指数（各5年数据）
+        "US30.cash",
+        "US100.cash",
+        "US500.cash",
+        "US2000.cash",
+        # 日本指数
+        "JP225.cash",
+    ]
+
+    # [deprecated] 相关性分组（已废弃，改用 TRAINABLE_SYMBOLS 单品种训练）
+    # 保留供回测参考，新训练不再使用
     SYMBOL_GROUPS = {
         "forex":          ["EURUSD", "USDJPY"],
-        "precious_metals":["XAUUSD", "XAGUSD"],   # 贵金属（黄金+白银，8.3年对齐）
+        "precious_metals":["XAUUSD", "XAGUSD"],
         "index":          ["US30.cash", "US100.cash", "US500.cash", "US2000.cash", "JP225.cash"],
     }
 
