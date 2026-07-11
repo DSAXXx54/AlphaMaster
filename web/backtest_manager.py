@@ -28,7 +28,7 @@ LOG_DIR.mkdir(exist_ok=True)
 # 回测阶段：用日志关键字推断当前进行到哪一步，用于前端进度展示
 BACKTEST_PHASES: list[tuple[str, str]] = [
     ("init", "初始化"),
-    ("spread", "获取点差"),
+    ("cost", "交易成本"),
     ("strategy", "加载策略"),
     ("data", "加载行情数据"),
     ("compute", "回测计算"),
@@ -50,6 +50,8 @@ class JobState(str, Enum):
 class BacktestJob:
     strategy_file: str
     symbol: str
+    commission_pct: float = 0.02
+    slippage_pct: float = 0.01
     state: JobState = JobState.RUNNING
     pid: int | None = None
     log_path: str = ""
@@ -62,6 +64,8 @@ class BacktestJob:
         return {
             "strategy_file": self.strategy_file,
             "symbol": self.symbol,
+            "commission_pct": self.commission_pct,
+            "slippage_pct": self.slippage_pct,
             "state": self.state.value,
             "pid": self.pid,
             "log_path": self.log_path,
@@ -94,7 +98,13 @@ class BacktestManager:
             "phase_total": len(BACKTEST_PHASES),
         }
 
-    def start(self, strategy_file: str, data_file: str | None = None) -> BacktestJob:
+    def start(
+        self,
+        strategy_file: str,
+        data_file: str | None = None,
+        commission_pct: float = 0.02,
+        slippage_pct: float = 0.01,
+    ) -> BacktestJob:
         with self._lock:
             self._refresh_state()
             if self._proc is not None and self._proc.poll() is None:
@@ -115,6 +125,10 @@ class BacktestManager:
                 "--offline",
                 "--strategy-file",
                 strategy_file,
+                "--commission",
+                str(commission_pct),
+                "--slippage",
+                str(slippage_pct),
             ]
             if data_file:
                 cmd.extend(["--data-file", data_file])
@@ -142,6 +156,8 @@ class BacktestManager:
             self._job = BacktestJob(
                 strategy_file=strategy_file,
                 symbol=symbol,
+                commission_pct=float(commission_pct),
+                slippage_pct=float(slippage_pct),
                 pid=self._proc.pid,
                 log_path=str(log_path.relative_to(PROJECT_ROOT)).replace("\\", "/"),
                 started_at=datetime.now(timezone.utc).isoformat(),
@@ -170,8 +186,8 @@ class BacktestManager:
         text = "\n".join(lines)
         # 从后往前匹配最靠后的阶段关键字
         detected = "init"
-        if "获取实时点差" in text or "离线模式" in text:
-            detected = "spread"
+        if "交易成本" in text or "手续费=" in text:
+            detected = "cost"
         if "加载各品种策略" in text or re.search(r"score=", text) or "模式:" in text:
             detected = "strategy"
         if "正在加载数据" in text:

@@ -14,7 +14,7 @@ let lastDebugViewContent = "";
 let currentPage = "train";
 let btActive = false;
 let btBuster = "";      // 图表缓存刷新键（用 job 时间戳）
-let btChartSig = "";    // 图表签名，变化时才重建图库避免闪烁
+let lastTrainingActive = false;
 
 const $ = (id) => document.getElementById(id);
 
@@ -212,6 +212,10 @@ function updateBtStartBtn() {
   const startBtn = $("btStartBtn");
   if (!startBtn) return;
   startBtn.disabled = btActive || !selectedStrategyFile;
+  ["btCommissionInput", "btSlippageInput"].forEach((id) => {
+    const el = $(id);
+    if (el) el.disabled = btActive;
+  });
 }
 
 function renderStrategyFileCard(info) {
@@ -521,7 +525,13 @@ async function refreshOverview() {
   updateTrainingUI(training);
   renderStrategies(strategies.strategies);
 
-  const sym = overview.progress?.symbol || selectedSymbol;
+  const sym = overview.progress?.symbol || selectedSymbol || training?.job?.symbol;
+  const trainingActive = !!training?.active;
+  if (lastTrainingActive && !trainingActive && sym) {
+    await applyBestStrategyForBacktest(sym, null);
+  }
+  lastTrainingActive = trainingActive;
+
   if (sym && (training?.active || overview.progress)) {
     await loadSymbolChart(sym, overview.progress);
   }
@@ -547,6 +557,187 @@ async function loadConfig() {
   }
   if (cfg.data_file) renderDataFileCard(cfg.data_file);
   if (cfg.strategy_file) renderStrategyFileCard(cfg.strategy_file);
+  applyBacktestCostDefaults(cfg);
+  await initAiPanel(cfg);
+}
+
+function applyBacktestCostDefaults(cfg) {
+  const cIn = $("btCommissionInput");
+  const sIn = $("btSlippageInput");
+  if (cIn && cfg.bt_commission_pct != null) cIn.value = Number(cfg.bt_commission_pct);
+  if (sIn && cfg.bt_slippage_pct != null) sIn.value = Number(cfg.bt_slippage_pct);
+  updateBtCostHint();
+}
+
+function readBacktestCosts() {
+  const cRaw = Number($("btCommissionInput")?.value);
+  const sRaw = Number($("btSlippageInput")?.value);
+  const commission = Number.isFinite(cRaw) && cRaw >= 0 ? cRaw : 0.02;
+  const slippage = Number.isFinite(sRaw) && sRaw >= 0 ? sRaw : 0.01;
+  return { commission_pct: commission, slippage_pct: slippage };
+}
+
+function updateBtCostHint() {
+  const hint = $("btCostSumHint");
+  if (!hint) return;
+  const { commission_pct, slippage_pct } = readBacktestCosts();
+  const fee = Number((commission_pct + slippage_pct).toFixed(4));
+  hint.textContent = `单边成本 ${fee}%`;
+}
+
+async function initAiPanel(cfg) {
+  const keyInput = $("aiApiKeyInput");
+  if (!keyInput) return;
+
+  if (cfg?.ai_api_key) keyInput.value = cfg.ai_api_key;
+  else if (cfg?.ai_provider === "openclaw" || cfg?.ai_provider === "openclaw_wb") {
+    keyInput.value = cfg.ai_provider;
+  }
+
+  try {
+    const status = await fetchJSON("/api/ai/providers");
+    window.__aiProviderStatus = status;
+  } catch (_) {
+    window.__aiProviderStatus = null;
+  }
+  updateAiChannelHint();
+}
+
+function resolveAiFromKey(raw) {
+  const v = (raw || "").trim().toLowerCase();
+  if (v === "openclaw" || v.startsWith("openclaw/")) {
+    return { provider: "openclaw", apiKey: raw.trim(), isAlias: true };
+  }
+  if (v === "openclaw_wb" || v.startsWith("openclaw_wb/")) {
+    return { provider: "openclaw_wb", apiKey: raw.trim(), isAlias: true };
+  }
+  return { provider: "deepseek", apiKey: (raw || "").trim(), isAlias: false };
+}
+
+function updateAiChannelHint() {
+  const hint = $("aiChannelHint");
+  const headHint = $("aiProviderHint");
+  const keyInput = $("aiApiKeyInput");
+  if (!hint || !keyInput) return;
+
+  const resolved = resolveAiFromKey(keyInput.value);
+  const status = window.__aiProviderStatus;
+  const row = (status?.providers || []).find((p) => p.id === resolved.provider);
+
+  if (resolved.provider === "deepseek") {
+    if (headHint) headHint.textContent = "DeepSeek · deepseek-v4-flash";
+    hint.textContent = "当前：DeepSeek（deepseek-v4-flash · https://api.deepseek.com）。也可在 Key 中输入 openclaw 或 openclaw_wb。";
+  } else if (resolved.provider === "openclaw") {
+    if (headHint) headHint.textContent = row?.available ? "openclaw (QClaw) · 已匹配" : "openclaw (QClaw) · 未就绪";
+    hint.textContent = row?.hint || "已匹配 openclaw：将自动使用本地 QClaw token。";
+  } else {
+    if (headHint) headHint.textContent = row?.available ? "openclaw_wb · 已匹配" : "openclaw_wb · 未就绪";
+    hint.textContent = row?.hint || "已匹配 openclaw_wb：将自动使用 WorkBuddy token。";
+  }
+}
+
+function openUnlimitedModal() {
+  const modal = $("aiUnlimitedModal");
+  if (modal) modal.hidden = false;
+}
+
+function closeUnlimitedModal() {
+  const modal = $("aiUnlimitedModal");
+  if (modal) modal.hidden = true;
+}
+
+async function runAiAnalyze() {
+  const btn = $("aiAnalyzeBtn");
+  const view = $("aiAnswerView");
+  const rawKey = $("aiApiKeyInput")?.value || "";
+  const resolved = resolveAiFromKey(rawKey);
+  if (!view) return;
+
+  if (resolved.provider === "deepseek" && !resolved.apiKey) {
+    view.className = "ai-answer error";
+    view.textContent = "请填写 DeepSeek API Key，或在 Key 中输入 openclaw / openclaw_wb";
+    return;
+  }
+
+  if (btn) btn.disabled = true;
+  view.className = "ai-answer loading";
+  view.textContent = `正在通过 ${resolved.provider} 连接并流式分析…`;
+
+  let header = "";
+  let answer = "";
+
+  try {
+    const res = await fetch(API + "/api/ai/analyze-training", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        provider: resolved.provider,
+        api_key: resolved.apiKey,
+        symbol: selectedSymbol || null,
+      }),
+    });
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}));
+      throw new Error(formatApiError(data, res.status, "/api/ai/analyze-training"));
+    }
+    if (!res.body) throw new Error("浏览器不支持流式响应");
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder("utf-8");
+    let buffer = "";
+    view.className = "ai-answer streaming";
+    view.textContent = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const chunks = buffer.split("\n\n");
+      buffer = chunks.pop() || "";
+      for (const block of chunks) {
+        const line = block
+          .split("\n")
+          .map((l) => l.trim())
+          .find((l) => l.startsWith("data:"));
+        if (!line) continue;
+        let event;
+        try {
+          event = JSON.parse(line.slice(5).trim());
+        } catch (_) {
+          continue;
+        }
+        if (event.type === "meta") {
+          header =
+            `[${event.label || event.provider || resolved.provider} · ${event.model || ""} · ${event.symbol || ""}${event.timeframe ? " " + event.timeframe : ""}]` +
+            (event.prior_count
+              ? ` · 已带入前 ${event.prior_count} 次同品种同周期分析`
+              : " · 首次分析") +
+            `\n\n`;
+          view.textContent = header;
+          view.scrollTop = view.scrollHeight;
+        } else if (event.type === "delta") {
+          answer += event.text || "";
+          view.textContent = header + answer;
+          view.scrollTop = view.scrollHeight;
+        } else if (event.type === "error") {
+          throw new Error(event.message || "分析失败");
+        } else if (event.type === "done") {
+          answer = event.answer || answer;
+          view.className = "ai-answer";
+          view.textContent = header + (answer || "（无内容）");
+        }
+      }
+    }
+    if (!answer && view.className.includes("streaming")) {
+      throw new Error("流式分析中断，未收到完整回复");
+    }
+    view.className = "ai-answer";
+  } catch (e) {
+    view.className = "ai-answer error";
+    view.textContent = `分析失败: ${e.message}`;
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 async function browseStrategyFile() {
@@ -559,7 +750,29 @@ async function browseStrategyFile() {
   }
 }
 
+async function applyBestStrategyForBacktest(symbol, strategyFile) {
+  if (strategyFile) {
+    renderStrategyFileCard(strategyFile);
+    return;
+  }
+  if (!symbol) return;
+  try {
+    const res = await fetchJSON(
+      `/api/strategy-file/sync-best?symbol=${encodeURIComponent(symbol)}`,
+      { method: "POST" }
+    );
+    renderStrategyFileCard(res);
+  } catch (_) {
+    await loadBacktestStrategyContext();
+  }
+}
+
 async function loadBacktestStrategyContext() {
+  const sym = selectedStrategySymbol || selectedSymbol;
+  if (sym) {
+    await applyBestStrategyForBacktest(sym, null);
+    return;
+  }
   try {
     const cfg = await fetchJSON("/api/config");
     if (cfg.strategy_file) renderStrategyFileCard(cfg.strategy_file);
@@ -709,6 +922,14 @@ async function handleImportTrainingFile(event) {
   }
 }
 
+function parseContentDispositionFilename(header) {
+  if (!header) return null;
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(header);
+  if (utf8) return decodeURIComponent(utf8[1]);
+  const plain = /filename="([^"]+)"/i.exec(header) || /filename=([^;]+)/i.exec(header);
+  return plain ? plain[1].trim() : null;
+}
+
 async function exportStrategy() {
   const sym = selectedSymbol;
   if (!sym) {
@@ -726,7 +947,9 @@ async function exportStrategy() {
     const url = URL.createObjectURL(blob);
     const a = document.createElement("a");
     a.href = url;
-    a.download = `strategy_${sym.replace(/\./g, "_")}.json`;
+    a.download =
+      parseContentDispositionFilename(res.headers.get("Content-Disposition")) ||
+      `strategy_${sym.replace(/\./g, "_")}.json`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -739,8 +962,10 @@ async function exportStrategy() {
 
 async function stopTraining() {
   try {
-    await fetchJSON("/api/training/stop", { method: "POST" });
+    const res = await fetchJSON("/api/training/stop", { method: "POST" });
     await refreshOverview();
+    const sym = res.training?.job?.symbol || selectedSymbol;
+    await applyBestStrategyForBacktest(sym, res.strategy_file);
   } catch (e) {
     $("debugView").scrollIntoView({ behavior: "smooth", block: "nearest" });
   }
@@ -759,7 +984,7 @@ function switchPage(page) {
     p.classList.toggle("active", p.id === `page-${page}`);
   });
   if (page === "backtest") {
-    if (!selectedStrategyFile) loadBacktestStrategyContext();
+    loadBacktestStrategyContext();
     refreshBacktest();
   }
 }
@@ -867,12 +1092,25 @@ async function refreshBacktestReport() {
   }
   if (!data.available || !data.report) {
     if ($("btPortfolioHint")) $("btPortfolioHint").textContent = "尚未运行回测";
-    renderCharts([]);
+    renderEquity(null);
     return;
   }
   renderPortfolio(data.report);
   renderBacktestTable(data.report.symbols || {});
-  renderCharts(data.charts || []);
+  await refreshEquityCurve();
+}
+
+async function refreshEquityCurve() {
+  const sym = selectedStrategySymbol || selectedSymbol;
+  const url = sym
+    ? `/api/backtest/equity?symbol=${encodeURIComponent(sym)}`
+    : "/api/backtest/equity";
+  try {
+    const data = await fetchJSON(url);
+    renderEquity(data);
+  } catch (_) {
+    renderEquity(null);
+  }
 }
 
 function renderPortfolio(report) {
@@ -887,12 +1125,14 @@ function renderPortfolio(report) {
     return;
   }
 
+  const plSrc = symData?.profit_loss_ratio ?? p.profit_loss_ratio;
+  const plNum = Number(plSrc);
+  const plText = Number.isFinite(plNum) ? plNum.toFixed(3) : "—";
   const cards = [
     { label: "总收益", value: fmtPct(p.total_return), cls: p.total_return >= 0 ? "pos" : "neg" },
     { label: "Sharpe", value: fmtSigned(p.sharpe), cls: "accent" },
     { label: "Sortino", value: fmtSigned(p.sortino), cls: "accent" },
-    { label: "最大回撤", value: (p.max_drawdown * 100).toFixed(2) + "%", cls: "neg" },
-    { label: "Calmar", value: fmtSigned(p.calmar), cls: "accent" },
+    { label: "盈亏比", value: plText, cls: Number.isFinite(plNum) ? "accent" : "" },
     {
       label: "交易数",
       value: symData?.n_trades ?? p.n_trades ?? "—",
@@ -925,7 +1165,7 @@ function renderBacktestTable(symbols) {
   if (!tbody) return;
   const rows = Object.entries(symbols);
   if (!rows.length) {
-    tbody.innerHTML = '<tr class="empty-row"><td colspan="8">暂无回测结果</td></tr>';
+    tbody.innerHTML = '<tr class="empty-row"><td colspan="7">暂无回测结果</td></tr>';
     if ($("btTableHint")) $("btTableHint").textContent = "—";
     return;
   }
@@ -940,8 +1180,7 @@ function renderBacktestTable(symbols) {
         <td class="${retCls}">${fmtPct(d.total_return)}</td>
         <td class="${shCls}">${fmtSigned(d.sharpe)}</td>
         <td>${fmtSigned(d.sortino)}</td>
-        <td class="neg">${(d.max_drawdown * 100).toFixed(2)}%</td>
-        <td>${fmtSigned(d.calmar, 2)}</td>
+        <td>${Number.isFinite(Number(d.profit_loss_ratio)) ? Number(d.profit_loss_ratio).toFixed(3) : "—"}</td>
         <td>${d.n_trades ?? "—"}</td>
         <td>${d.win_rate != null ? (d.win_rate * 100).toFixed(1) + "%" : "—"}</td>
       </tr>`;
@@ -949,33 +1188,284 @@ function renderBacktestTable(symbols) {
     .join("");
 }
 
-function renderCharts(charts) {
-  const gallery = $("btChartGallery");
-  if (!gallery) return;
-  if (!charts.length) {
-    gallery.innerHTML = '<div class="metric-empty">暂无图表</div>';
-    btChartSig = "";
+// ═══════════════════════════════════════════════════════════════════
+// 交互式资金曲线（HTML / Chart.js）
+// ═══════════════════════════════════════════════════════════════════
+let equityChart = null;
+let rollingChart = null;
+let btEquitySig = "";
+
+const EQUITY_COLORS = [
+  { hex: "#5eead4", rgb: "94, 234, 212" },
+  { hex: "#38bdf8", rgb: "56, 189, 248" },
+  { hex: "#818cf8", rgb: "129, 140, 248" },
+  { hex: "#fbbf24", rgb: "251, 191, 36" },
+  { hex: "#f472b6", rgb: "244, 114, 182" },
+  { hex: "#a3e635", rgb: "163, 230, 53" },
+];
+
+function verticalGradient(chart, rgb, topAlpha, bottomAlpha) {
+  const { ctx, chartArea } = chart;
+  if (!chartArea) return `rgba(${rgb}, ${topAlpha})`;
+  const g = ctx.createLinearGradient(0, chartArea.top, 0, chartArea.bottom);
+  g.addColorStop(0, `rgba(${rgb}, ${topAlpha})`);
+  g.addColorStop(0.62, `rgba(${rgb}, ${(topAlpha + bottomAlpha) / 4})`);
+  g.addColorStop(1, `rgba(${rgb}, ${bottomAlpha})`);
+  return g;
+}
+
+const EQUITY_TOOLTIP = {
+  backgroundColor: "rgba(8, 12, 20, 0.94)",
+  borderColor: "rgba(94, 234, 212, 0.35)",
+  borderWidth: 1,
+  titleColor: "#e8edf4",
+  bodyColor: "#a9bccf",
+  titleFont: { family: "'JetBrains Mono'", size: 11 },
+  bodyFont: { family: "'JetBrains Mono'", size: 11 },
+  padding: 10,
+  cornerRadius: 8,
+  usePointStyle: true,
+};
+
+const EQUITY_OPTIONS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  interaction: { mode: "index", intersect: false },
+  animation: { duration: 500, easing: "easeOutQuart" },
+  plugins: {
+    legend: {
+      display: true,
+      labels: {
+        color: "#a9bccf",
+        usePointStyle: true,
+        pointStyle: "circle",
+        boxWidth: 8,
+        boxHeight: 8,
+        padding: 14,
+        font: { family: "'DM Sans'", size: 12, weight: "600" },
+      },
+    },
+    tooltip: {
+      ...EQUITY_TOOLTIP,
+      callbacks: {
+        label: (c) => ` ${c.dataset.label}: ${Number(c.parsed.y).toFixed(4)}`,
+      },
+    },
+  },
+  scales: {
+    x: {
+      ticks: { color: "#6b7d92", maxTicksLimit: 8, maxRotation: 0, font: { family: "'JetBrains Mono'", size: 10 } },
+      grid: { color: "rgba(120,190,235,0.05)" },
+      border: { color: "rgba(120,190,235,0.12)" },
+    },
+    y: {
+      ticks: { color: "#6b7d92", font: { family: "'JetBrains Mono'", size: 10 } },
+      grid: { color: "rgba(120,190,235,0.05)" },
+      border: { color: "rgba(120,190,235,0.12)" },
+    },
+  },
+};
+
+const ROLLING_OPTIONS = {
+  responsive: true,
+  maintainAspectRatio: false,
+  interaction: { mode: "index", intersect: false },
+  animation: { duration: 500, easing: "easeOutQuart" },
+  spanGaps: false,
+  plugins: {
+    legend: { display: false },
+    tooltip: {
+      ...EQUITY_TOOLTIP,
+      borderColor: "rgba(251, 191, 36, 0.4)",
+      callbacks: {
+        label: (c) => {
+          const v = c.parsed.y;
+          if (v == null || Number.isNaN(v)) return " 滚动夏普: —";
+          return ` 滚动夏普: ${Number(v).toFixed(3)}`;
+        },
+      },
+    },
+  },
+  scales: {
+    x: {
+      ticks: { color: "#6b7d92", maxTicksLimit: 8, maxRotation: 0, font: { family: "'JetBrains Mono'", size: 10 } },
+      grid: { color: "rgba(120,190,235,0.05)" },
+      border: { color: "rgba(120,190,235,0.12)" },
+    },
+    y: {
+      ticks: { color: "#6b7d92", font: { family: "'JetBrains Mono'", size: 10 } },
+      grid: { color: "rgba(251,191,36,0.06)" },
+      border: { color: "rgba(251,191,36,0.18)" },
+    },
+  },
+};
+
+function destroyEquityCharts() {
+  if (equityChart) { equityChart.destroy(); equityChart = null; }
+  if (rollingChart) { rollingChart.destroy(); rollingChart = null; }
+}
+
+function renderEquityStats(name, series) {
+  const el = $("btEquityStats");
+  if (!el) return;
+  const pl = series.profit_loss_ratio;
+  const plText = Number.isFinite(Number(pl)) ? Number(pl).toFixed(3) : "—";
+  const roll = series.rolling_sharpe || [];
+  let lastRoll = null;
+  for (let i = roll.length - 1; i >= 0; i--) {
+    const v = Number(roll[i]);
+    if (Number.isFinite(v)) {
+      lastRoll = v;
+      break;
+    }
+  }
+  const cards = [
+    { label: "总收益", value: fmtPct(series.total_return), cls: series.total_return >= 0 ? "pos" : "neg" },
+    { label: "夏普", value: fmtSigned(series.sharpe), cls: "accent" },
+    { label: "索提诺", value: fmtSigned(series.sortino), cls: "accent" },
+    { label: "盈亏比", value: plText, cls: "accent" },
+    {
+      label: "最新滚动夏普",
+      value: lastRoll != null ? fmtSigned(lastRoll) : "—",
+      cls: lastRoll == null ? "" : lastRoll >= 0 ? "accent" : "neg",
+    },
+  ];
+  el.innerHTML =
+    `<span class="equity-stat-name">${name}</span>` +
+    cards
+      .map(
+        (c) => `
+      <div class="equity-stat">
+        <span class="equity-stat-label">${c.label}</span>
+        <span class="equity-stat-value ${c.cls}">${c.value}</span>
+      </div>`
+      )
+      .join("");
+}
+
+function buildEquityChart(labels, symbols, portfolio) {
+  const canvas = $("btEquityChart");
+  if (!canvas) return;
+  const symNames = Object.keys(symbols);
+  const multi = symNames.length > 1;
+  const datasets = symNames.map((s, i) => {
+    const col = EQUITY_COLORS[i % EQUITY_COLORS.length];
+    return {
+      label: s,
+      data: symbols[s].equity,
+      borderColor: col.hex,
+      borderWidth: multi ? 1.5 : 2.2,
+      tension: 0.25,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      pointHoverBackgroundColor: col.hex,
+      pointHoverBorderColor: "#05070d",
+      fill: !multi,
+      backgroundColor: (ctx) => verticalGradient(ctx.chart, col.rgb, 0.3, 0),
+    };
+  });
+  if (portfolio) {
+    datasets.push({
+      label: "等权组合",
+      data: portfolio.equity,
+      borderColor: "#e8edf4",
+      borderWidth: 2.4,
+      tension: 0.25,
+      pointRadius: 0,
+      pointHoverRadius: 4,
+      pointHoverBackgroundColor: "#e8edf4",
+      pointHoverBorderColor: "#05070d",
+      fill: true,
+      backgroundColor: (ctx) => verticalGradient(ctx.chart, "232, 237, 244", 0.16, 0),
+    });
+  }
+  if (equityChart) equityChart.destroy();
+  equityChart = new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: { labels, datasets },
+    options: EQUITY_OPTIONS,
+  });
+}
+
+function buildRollingChart(labels, series, windowBars) {
+  const canvas = $("btRollingChart");
+  if (!canvas) return;
+  if (rollingChart) rollingChart.destroy();
+  const data = series.rolling_sharpe || [];
+  const labelEl = $("btRollingLabel");
+  if (labelEl) {
+    labelEl.textContent = windowBars
+      ? `滚动夏普 · ${windowBars} bars`
+      : "滚动夏普 · Rolling Sharpe";
+  }
+  rollingChart = new Chart(canvas.getContext("2d"), {
+    type: "line",
+    data: {
+      labels,
+      datasets: [
+        {
+          label: "滚动夏普",
+          data,
+          borderColor: "#fbbf24",
+          borderWidth: 1.5,
+          tension: 0.2,
+          pointRadius: 0,
+          pointHoverRadius: 4,
+          pointHoverBackgroundColor: "#fbbf24",
+          pointHoverBorderColor: "#05070d",
+          spanGaps: false,
+          fill: {
+            target: "origin",
+            above: "rgba(251, 191, 36, 0.16)",
+            below: "rgba(248, 113, 113, 0.16)",
+          },
+        },
+      ],
+    },
+    options: ROLLING_OPTIONS,
+  });
+}
+
+function renderEquity(resp) {
+  const live = $("btEquityLive");
+  const empty = $("btEquityEmpty");
+  const data = resp?.data;
+  const symbols = data?.symbols || {};
+  const symNames = Object.keys(symbols);
+
+  if (!resp?.available || !symNames.length) {
+    if (live) live.hidden = true;
+    if (empty) empty.hidden = false;
+    destroyEquityCharts();
+    btEquitySig = "";
     return;
   }
-  const sig = charts.map((c) => c.name).join(",") + "|" + btBuster;
-  if (sig === btChartSig) return; // 无变化，避免图片重载闪烁
-  btChartSig = sig;
 
-  const bust = encodeURIComponent(btBuster || "0");
-  gallery.innerHTML = charts
-    .map(
-      (c) => `
-    <div class="chart-card ${c.kind === "portfolio" ? "portfolio" : ""}" data-name="${c.name}">
-      <div class="chart-card-head">${c.label}</div>
-      <img src="${API}/api/backtest/chart/${encodeURIComponent(c.name)}?t=${bust}" alt="${c.label}" loading="lazy" />
-    </div>`
-    )
-    .join("");
+  const focus = resp.focus_symbol;
+  const sig = [focus, data.total_bars, data.n_points, data.rolling_window, symNames.join(",")].join("|") + "|" + btBuster;
+  if (sig === btEquitySig && equityChart) return; // 无变化，避免重建闪烁
+  btEquitySig = sig;
+
+  if (live) live.hidden = false;
+  if (empty) empty.hidden = true;
+
+  const portfolio = data.portfolio || null;
+  let mainName, mainSeries;
+  if (portfolio) {
+    mainName = "等权组合";
+    mainSeries = portfolio;
+  } else {
+    const key = focus && symbols[focus] ? focus : symNames[0];
+    mainName = key;
+    mainSeries = symbols[key];
+  }
+
+  renderEquityStats(mainName, mainSeries);
+  buildEquityChart(data.labels, symbols, portfolio);
+  buildRollingChart(data.labels, mainSeries, data.rolling_window);
+
   if ($("btChartsHint")) {
-    const sym = selectedStrategySymbol || selectedSymbol;
-    $("btChartsHint").textContent = sym
-      ? `${sym} · ${charts.length} 张图表 · 点击放大`
-      : `${charts.length} 张图表 · 点击放大`;
+    $("btChartsHint").textContent = `${mainName} · 交互式资金曲线 · 悬停查看数值`;
   }
 }
 
@@ -987,13 +1477,17 @@ async function startBacktest() {
   const startBtn = $("btStartBtn");
   if (startBtn) startBtn.disabled = true;
   try {
+    const costs = readBacktestCosts();
     const res = await fetchJSON("/api/backtest/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ strategy_file: selectedStrategyFile }),
+      body: JSON.stringify({
+        strategy_file: selectedStrategyFile,
+        commission_pct: costs.commission_pct,
+        slippage_pct: costs.slippage_pct,
+      }),
     });
     if (res.strategy_file) renderStrategyFileCard(res.strategy_file);
-    btChartSig = ""; // 强制下次重建图库
     await refreshBacktest();
   } catch (e) {
     if ($("btLogHint")) $("btLogHint").textContent = e.message;
@@ -1008,21 +1502,6 @@ async function stopBacktest() {
   } catch (e) {
     if ($("btLogHint")) $("btLogHint").textContent = e.message;
   }
-}
-
-// ═══════════════════════════════════════════════════════════════════
-// 图片灯箱
-// ═══════════════════════════════════════════════════════════════════
-function openLightbox(src) {
-  const lb = $("lightbox");
-  const img = $("lightboxImg");
-  if (!lb || !img) return;
-  img.src = src;
-  lb.classList.add("open");
-}
-function closeLightbox() {
-  const lb = $("lightbox");
-  if (lb) lb.classList.remove("open");
 }
 
 function startPolling() {
@@ -1048,6 +1527,15 @@ async function init() {
   $("importTrainingBtn").addEventListener("click", triggerImportTraining);
   $("importTrainingFile").addEventListener("change", handleImportTrainingFile);
   $("debugModeCheck").addEventListener("change", (e) => setDebugMode(e.target.checked));
+  if ($("aiApiKeyInput")) {
+    $("aiApiKeyInput").addEventListener("input", updateAiChannelHint);
+    $("aiApiKeyInput").addEventListener("change", updateAiChannelHint);
+  }
+  if ($("aiAnalyzeBtn")) $("aiAnalyzeBtn").addEventListener("click", runAiAnalyze);
+  if ($("aiUnlimitedBtn")) $("aiUnlimitedBtn").addEventListener("click", openUnlimitedModal);
+  document.querySelectorAll("[data-close-unlimited]").forEach((el) => {
+    el.addEventListener("click", closeUnlimitedModal);
+  });
 
   // 步骤导航
   document.querySelectorAll(".stepper .step").forEach((btn) => {
@@ -1058,21 +1546,11 @@ async function init() {
   if ($("btBrowseStrategyBtn")) $("btBrowseStrategyBtn").addEventListener("click", browseStrategyFile);
   if ($("btStartBtn")) $("btStartBtn").addEventListener("click", startBacktest);
   if ($("btStopBtn")) $("btStopBtn").addEventListener("click", stopBacktest);
-
-  // 图表灯箱
-  const gallery = $("btChartGallery");
-  if (gallery) {
-    gallery.addEventListener("click", (e) => {
-      const card = e.target.closest(".chart-card");
-      if (!card) return;
-      const img = card.querySelector("img");
-      if (img) openLightbox(img.src);
-    });
-  }
-  const lb = $("lightbox");
-  if (lb) lb.addEventListener("click", closeLightbox);
-  document.addEventListener("keydown", (e) => {
-    if (e.key === "Escape") closeLightbox();
+  ["btCommissionInput", "btSlippageInput"].forEach((id) => {
+    const el = $(id);
+    if (!el) return;
+    el.addEventListener("input", updateBtCostHint);
+    el.addEventListener("change", updateBtCostHint);
   });
 
   startPolling();

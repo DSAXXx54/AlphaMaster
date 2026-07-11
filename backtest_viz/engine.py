@@ -56,6 +56,7 @@ class SymbolResult:
     win_rate:     float          = 0.0
     max_drawdown: float          = 0.0
     avg_hold_bars:float          = 0.0
+    profit_loss_ratio: float | None = None  # 盈亏比 = 平均盈利 / 平均亏损
 
 
 class BacktestEngine:
@@ -167,7 +168,6 @@ class BacktestEngine:
             sum(1 for t in trades if t.pnl > 0) / n_trades
             if n_trades else 0.0
         )
-        max_dd        = self._calc_max_drawdown(cum_pnl)
         avg_hold      = (
             sum(
                 (t.exit_bar - t.entry_bar)
@@ -175,6 +175,7 @@ class BacktestEngine:
             ) / n_trades
             if n_trades else 0.0
         )
+        pl_ratio      = self._calc_profit_loss_ratio(trades)
 
         return SymbolResult(
             symbol       = symbol,
@@ -194,8 +195,9 @@ class BacktestEngine:
             total_return = total_return,
             n_trades     = n_trades,
             win_rate     = win_rate,
-            max_drawdown = max_dd,
+            max_drawdown = 0.0,
             avg_hold_bars= avg_hold,
+            profit_loss_ratio = pl_ratio,
         )
 
     # ─────────────────────────────────────────────────────────────────────
@@ -296,9 +298,14 @@ class BacktestEngine:
         return float(np.clip(sortino, -20.0, 20.0))
 
     @staticmethod
-    def _calc_max_drawdown(cum_pnl: np.ndarray) -> float:
-        if len(cum_pnl) == 0:
-            return 0.0
-        peak = np.maximum.accumulate(cum_pnl)
-        drawdown = peak - cum_pnl
-        return float(drawdown.max())
+    def _calc_profit_loss_ratio(trades: list[Trade]) -> float | None:
+        """盈亏比 = 平均盈利 / 平均亏损绝对值。无盈利或无亏损时返回 None。"""
+        wins = [t.pnl for t in trades if t.pnl is not None and t.pnl > 0]
+        losses = [abs(t.pnl) for t in trades if t.pnl is not None and t.pnl < 0]
+        if not wins or not losses:
+            return None
+        avg_win = sum(wins) / len(wins)
+        avg_loss = sum(losses) / len(losses)
+        if avg_loss <= 0:
+            return None
+        return float(avg_win / avg_loss)

@@ -41,7 +41,8 @@ class BacktestReport:
             print(line)
             print(f"  {'Sortino Ratio':20s}: {r.sortino:+.4f}")
             print(f"  {'总 PnL (log ret)':20s}: {r.total_return:+.6f}")
-            print(f"  {'最大回撤':20s}: {r.max_drawdown:.6f}")
+            pl = r.profit_loss_ratio
+            print(f"  {'盈亏比':20s}: {pl:.4f}" if pl is not None else f"  {'盈亏比':20s}: —")
             print(f"  {'总交易笔数':20s}: {r.n_trades}")
             print(f"  {'胜率':20s}: {r.win_rate:.1%}")
             print(f"  {'平均持仓 (bars)':20s}: {r.avg_hold_bars:.1f}")
@@ -106,7 +107,10 @@ class BacktestReport:
                 "symbol":        r.symbol,
                 "sortino":       round(r.sortino, 4),
                 "total_return":  round(r.total_return, 8),
-                "max_drawdown":  round(r.max_drawdown, 8),
+                "profit_loss_ratio": (
+                    round(r.profit_loss_ratio, 4)
+                    if r.profit_loss_ratio is not None else None
+                ),
                 "n_trades":      r.n_trades,
                 "win_rate":      round(r.win_rate, 4),
                 "avg_hold_bars": round(r.avg_hold_bars, 2),

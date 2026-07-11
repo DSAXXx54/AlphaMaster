@@ -204,6 +204,19 @@ def get_strategy_for_export(symbol: str) -> dict[str, Any]:
     return out
 
 
+def build_strategy_export_filename(
+    symbol: str,
+    step: int,
+    score: float | None,
+) -> str:
+    """e.g. strategy_ADAUSD_step0084_score2.4021.json"""
+    safe = symbol.replace(".", "_")
+    step_part = f"step{max(0, int(step)):04d}"
+    if score is not None:
+        return f"strategy_{safe}_{step_part}_score{float(score):.4f}.json"
+    return f"strategy_{safe}_{step_part}.json"
+
+
 def list_strategies() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     if not STRATEGIES_DIR.exists():

@@ -131,13 +131,18 @@ class BacktestChart:
             framealpha=0.7,
         )
         ax_candle.grid(alpha=0.3)
+        pl_txt = (
+            f"{result.profit_loss_ratio:.3f}"
+            if result.profit_loss_ratio is not None
+            else "—"
+        )
         ax_candle.set_title(
             f"{result.symbol}  |  "
             f"Sortino={result.sortino:.2f}  "
             f"TotalRet={result.total_return:.4f}  "
             f"Trades={result.n_trades}  "
             f"WinRate={result.win_rate:.1%}  "
-            f"MaxDD={result.max_drawdown:.4f}  "
+            f"PLRatio={pl_txt}  "
             f"AvgHold={result.avg_hold_bars:.1f}bars"
             + (f"  |  {title_suffix}" if title_suffix else ""),
             fontsize=10, pad=6,

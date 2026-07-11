@@ -1,6 +1,7 @@
 """FastAPI application for AlphaMaster training UI."""
 from __future__ import annotations
 
+import json
 import sys
 import time
 import traceback
@@ -20,7 +21,13 @@ if str(ROOT) not in sys.path:
 from data_pipeline.parquet_manager import inspect_parquet_file
 from model_core.config import ModelConfig
 from web.file_dialog import pick_parquet_file, pick_strategy_file
-from web.progress import get_symbol_progress, get_strategy_for_export, list_strategies
+from web.progress import (
+    get_symbol_progress,
+    get_strategy_for_export,
+    invalidate_checkpoint_cache,
+    list_strategies,
+    build_strategy_export_filename,
+)
 from web.server_log import (
     debug_snapshot,
     get_logger,
@@ -30,7 +37,7 @@ from web.server_log import (
     setup_logging,
 )
 from web.settings import load_settings, save_settings
-from web.strategy_file import inspect_strategy_file, resolve_strategy_file
+from web.strategy_file import inspect_strategy_file, resolve_strategy_file, sync_best_strategy_for_symbol
 from web.training_manager import training_manager
 from web.training_package import build_training_export_zip, import_training_package
 from web.backtest_manager import backtest_manager
@@ -64,10 +71,22 @@ class SettingsRequest(BaseModel):
     last_data_file: str | None = None
     last_strategy_file: str | None = None
     debug_mode: bool | None = None
+    ai_provider: str | None = None
+    ai_api_key: str | None = None
+    bt_commission_pct: float | None = None
+    bt_slippage_pct: float | None = None
+
+
+class AnalyzeTrainingRequest(BaseModel):
+    provider: str | None = None
+    api_key: str | None = None
+    symbol: str | None = None
 
 
 class StartBacktestRequest(BaseModel):
     strategy_file: str
+    commission_pct: float | None = None
+    slippage_pct: float | None = None
 
 
 @app.middleware("http")
@@ -201,6 +220,38 @@ def _inspect_strategy_or_http(path: str) -> dict[str, Any]:
         raise HTTPException(400, str(e)) from e
 
 
+def _resolve_train_symbol(symbol: str | None = None) -> str | None:
+    if symbol:
+        return symbol.strip() or None
+    settings = load_settings()
+    data_file = settings.get("last_data_file") or ""
+    if not data_file:
+        return None
+    try:
+        return inspect_parquet_file(data_file).get("symbol")
+    except Exception:
+        return None
+
+
+def _wait_training_idle(timeout_s: float = 5.0) -> None:
+    import time
+
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        training_manager.status()
+        if not training_manager.status().get("active"):
+            return
+        time.sleep(0.2)
+
+
+def _sync_and_persist_best_strategy(symbol: str) -> dict[str, Any] | None:
+    invalidate_checkpoint_cache()
+    info = sync_best_strategy_for_symbol(symbol)
+    if info:
+        save_settings({"last_strategy_file": info["strategy_file"]})
+    return info
+
+
 @app.get("/api/health")
 def health() -> dict[str, str]:
     return {"status": "ok", "version": "1.1.0"}
@@ -248,6 +299,14 @@ def api_put_settings(req: SettingsRequest) -> dict[str, Any]:
         payload["last_strategy_file"] = req.last_strategy_file
     if req.debug_mode is not None:
         payload["debug_mode"] = req.debug_mode
+    if req.ai_provider is not None:
+        payload["ai_provider"] = req.ai_provider
+    if req.ai_api_key is not None:
+        payload["ai_api_key"] = req.ai_api_key
+    if req.bt_commission_pct is not None:
+        payload["bt_commission_pct"] = req.bt_commission_pct
+    if req.bt_slippage_pct is not None:
+        payload["bt_slippage_pct"] = req.bt_slippage_pct
     saved = save_settings(payload)
     if req.debug_mode is not None:
         set_debug_mode(req.debug_mode)
@@ -281,9 +340,68 @@ def api_config() -> dict[str, Any]:
         "last_strategy_file": strat_ctx["last_strategy_file"],
         "strategy_file": strat_ctx["strategy_file"],
         "debug_mode": load_settings().get("debug_mode", False),
+        "ai_provider": load_settings().get("ai_provider", "deepseek"),
+        "ai_api_key": load_settings().get("ai_api_key", ""),
+        "bt_commission_pct": settings.get("bt_commission_pct", 0.02),
+        "bt_slippage_pct": settings.get("bt_slippage_pct", 0.01),
         "server_log": snap["server_log"],
         "error_log": snap["error_log"],
     }
+
+
+@app.get("/api/ai/providers")
+def api_ai_providers() -> dict[str, Any]:
+    from web.ai_providers import provider_status
+
+    status = provider_status()
+    settings = load_settings()
+    status["selected"] = settings.get("ai_provider", "deepseek")
+    status["has_api_key"] = bool(settings.get("ai_api_key"))
+    return status
+
+
+@app.post("/api/ai/analyze-training")
+def api_ai_analyze_training(req: AnalyzeTrainingRequest):
+    from fastapi.responses import StreamingResponse
+
+    from web.ai_analyze import analyze_training_stream
+
+    settings = load_settings()
+    raw_key = req.api_key if req.api_key is not None else settings.get("ai_api_key") or ""
+    key_lower = str(raw_key).strip().lower()
+
+    if key_lower in ("openclaw",) or key_lower.startswith("openclaw/"):
+        provider = "openclaw"
+    elif key_lower in ("openclaw_wb",) or key_lower.startswith("openclaw_wb/"):
+        provider = "openclaw_wb"
+    else:
+        provider = (req.provider or settings.get("ai_provider") or "deepseek").strip()
+
+    save_settings({
+        "ai_provider": provider,
+        "ai_api_key": str(raw_key).strip(),
+    })
+
+    def event_gen():
+        try:
+            for event in analyze_training_stream(
+                provider=provider,
+                api_key=str(raw_key).strip() or None,
+                symbol=req.symbol,
+            ):
+                yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"
+        except Exception as exc:
+            yield f"data: {json.dumps({'type': 'error', 'message': str(exc)}, ensure_ascii=False)}\n\n"
+
+    return StreamingResponse(
+        event_gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 @app.post("/api/data-file/browse")
@@ -296,6 +414,18 @@ def api_browse_data_file() -> dict[str, Any]:
 @app.get("/api/strategy-file/browse")
 def api_browse_strategy_file() -> dict[str, Any]:
     return _browse_strategy_file()
+
+
+@app.post("/api/strategy-file/sync-best")
+@app.get("/api/strategy-file/sync-best")
+def api_sync_best_strategy(symbol: str | None = None) -> dict[str, Any]:
+    sym = _resolve_train_symbol(symbol)
+    if not sym:
+        raise HTTPException(400, "请先选择训练数据文件或指定品种")
+    info = _sync_and_persist_best_strategy(sym)
+    if not info:
+        raise HTTPException(404, f"未找到 {sym} 的可用策略")
+    return {"ok": True, **info}
 
 
 def _progress_with_live_step(symbol: str, active: bool) -> dict[str, Any]:
@@ -404,13 +534,18 @@ def api_export_strategy(symbol: str):
     except FileNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
-    safe = symbol.replace(".", "_")
+    progress = get_symbol_progress(symbol)
+    step = progress.current_step
+    score = payload.get("best_score")
+    if score is None:
+        score = progress.strategy_score if progress.strategy_score is not None else progress.best_score
+    filename = build_strategy_export_filename(symbol, step, score)
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     return Response(
         content=body,
         media_type="application/json; charset=utf-8",
         headers={
-            "Content-Disposition": f'attachment; filename="strategy_{safe}.json"',
+            "Content-Disposition": f'attachment; filename="{filename}"',
         },
     )
 
@@ -480,8 +615,18 @@ def api_training_start(req: StartTrainingRequest) -> dict[str, Any]:
 
 @app.post("/api/training/stop")
 def api_training_stop() -> dict[str, Any]:
+    job = training_manager.status().get("job") or {}
+    symbol = job.get("symbol")
     stopped = training_manager.stop()
-    return {"ok": stopped, "training": training_manager.status()}
+    strategy_file = None
+    if symbol:
+        _wait_training_idle()
+        strategy_file = _sync_and_persist_best_strategy(symbol)
+    return {
+        "ok": stopped,
+        "training": training_manager.status(),
+        "strategy_file": strategy_file,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -489,8 +634,8 @@ def api_training_stop() -> dict[str, Any]:
 # ─────────────────────────────────────────────────────────────────────
 
 _METRIC_KEYS = (
-    "total_return", "sharpe", "sortino", "max_drawdown",
-    "calmar", "n_trades", "win_rate", "avg_hold_bars",
+    "total_return", "sharpe", "sortino", "profit_loss_ratio",
+    "n_trades", "win_rate", "avg_hold_bars",
 )
 
 
@@ -541,8 +686,7 @@ def _filter_report_for_symbol(report: dict[str, Any], symbol: str) -> dict[str, 
             "total_return": sym_data.get("total_return"),
             "sharpe": sym_data.get("sharpe"),
             "sortino": sym_data.get("sortino"),
-            "max_drawdown": sym_data.get("max_drawdown"),
-            "calmar": sym_data.get("calmar"),
+            "profit_loss_ratio": sym_data.get("profit_loss_ratio"),
             "n_trades": sym_data.get("n_trades"),
             "win_rate": sym_data.get("win_rate"),
         },
@@ -561,16 +705,6 @@ def _list_backtest_charts(symbol: str | None = None) -> list[dict[str, str]]:
             charts.append(
                 {"name": equity.name, "label": f"{symbol} 资金曲线", "kind": "equity"}
             )
-        main = BACKTEST_OUTPUT_DIR / f"{symbol}.png"
-        if main.exists():
-            charts.append(
-                {"name": main.name, "label": f"{symbol} K线与交易", "kind": "symbol"}
-            )
-        for path in sorted(BACKTEST_OUTPUT_DIR.glob(f"{symbol}_trade*_zoom.png")):
-            stem = path.stem
-            trade_no = stem.replace(f"{symbol}_trade", "").replace("_zoom", "")
-            label = f"{symbol} 交易 #{trade_no}" if trade_no.isdigit() else stem
-            charts.append({"name": path.name, "label": label, "kind": "trade"})
         return charts
 
     charts = []
@@ -593,10 +727,28 @@ def api_backtest_status() -> dict[str, Any]:
 @app.post("/api/backtest/start")
 def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
     info = _inspect_strategy_or_http(req.strategy_file)
-    save_settings({"last_strategy_file": info["strategy_file"]})
+    settings = load_settings()
+    commission = (
+        float(req.commission_pct)
+        if req.commission_pct is not None
+        else float(settings.get("bt_commission_pct", 0.02))
+    )
+    slippage = (
+        float(req.slippage_pct)
+        if req.slippage_pct is not None
+        else float(settings.get("bt_slippage_pct", 0.01))
+    )
+    if commission < 0 or slippage < 0:
+        raise HTTPException(400, "手续费和滑点不能为负数")
+
+    save_settings({
+        "last_strategy_file": info["strategy_file"],
+        "bt_commission_pct": commission,
+        "bt_slippage_pct": slippage,
+    })
 
     data_file: str | None = None
-    last_data = load_settings().get("last_data_file") or ""
+    last_data = settings.get("last_data_file") or ""
     if last_data:
         try:
             pf = inspect_parquet_file(last_data)
@@ -609,6 +761,8 @@ def api_backtest_start(req: StartBacktestRequest) -> dict[str, Any]:
         job = backtest_manager.start(
             strategy_file=info["strategy_file"],
             data_file=data_file,
+            commission_pct=commission,
+            slippage_pct=slippage,
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
@@ -633,6 +787,31 @@ def api_backtest_report(symbol: str | None = None) -> dict[str, Any]:
         "charts": _list_backtest_charts(focus),
         "focus_symbol": focus,
     }
+
+
+@app.get("/api/backtest/equity")
+def api_backtest_equity(symbol: str | None = None) -> dict[str, Any]:
+    """资金曲线原始数据（供前端渲染交互式 HTML 图表）。"""
+    import json
+
+    path = BACKTEST_OUTPUT_DIR / "equity_curve.json"
+    focus = _backtest_focus_symbol(symbol)
+    if not path.exists():
+        return {"available": False, "focus_symbol": focus, "data": None}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {"available": False, "focus_symbol": focus, "data": None}
+
+    # 单品种模式：只保留聚焦品种，去掉无关序列
+    if focus and isinstance(data.get("symbols"), dict) and focus in data["symbols"]:
+        data = {
+            **data,
+            "symbols": {focus: data["symbols"][focus]},
+        }
+        data.pop("portfolio", None)
+
+    return {"available": True, "focus_symbol": focus, "data": data}
 
 
 @app.get("/api/backtest/chart/{name}")

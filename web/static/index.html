@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;1,9..40,400&family=JetBrains+Mono:wght@400;500;600&family=Orbitron:wght@500;600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/static/style.css?v=6" />
+  <link rel="stylesheet" href="/static/style.css?v=14" />
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
 <body>
@@ -166,6 +166,47 @@
       </div>
       <pre class="debug-view" id="debugView">暂无报错</pre>
     </section>
+
+    <section class="panel ai-panel" id="aiPanelSection">
+      <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
+      <span class="hud-corner bl"></span><span class="hud-corner br"></span>
+      <div class="panel-head">
+        <h2>AI 分析当前训练情况</h2>
+        <span class="hint" id="aiProviderHint">DeepSeek · deepseek-v4-flash</span>
+      </div>
+      <div class="ai-form">
+        <div class="ai-row">
+          <label class="ai-field ai-key-field" id="aiKeyField">
+            <span>API Key</span>
+            <input type="password" id="aiApiKeyInput" placeholder="填 DeepSeek Key，或输入 openclaw / openclaw_wb" autocomplete="off" />
+          </label>
+          <button type="button" class="btn btn-primary" id="aiAnalyzeBtn">开始分析</button>
+          <button type="button" class="btn btn-unlimited" id="aiUnlimitedBtn">获取无限分析功能</button>
+        </div>
+        <small class="field-hint" id="aiChannelHint">默认 DeepSeek（deepseek-v4-flash · https://api.deepseek.com）。若要走本地 Agent，在 API Key 里直接输入 openclaw 或 openclaw_wb。</small>
+      </div>
+      <div class="ai-answer" id="aiAnswerView">点击「开始分析」后，AI 将回答：当前训练情况怎么样，是否值得继续，以及最新因子的含义与原理。</div>
+    </section>
+
+    <div class="modal" id="aiUnlimitedModal" hidden>
+      <div class="modal-backdrop" data-close-unlimited></div>
+      <div class="modal-card" role="dialog" aria-labelledby="aiUnlimitedTitle">
+        <h3 id="aiUnlimitedTitle">获取无限分析次数</h3>
+        <div class="modal-body">
+          获取无限分析次数方法需付费49.9元，付费后你将获得<br>
+          Deepseek V4 Pro/GLM5.1/Kimi2.6等"满血"模型的无限分析方法<br>
+          注意无限分析次数只支持使用这个分析软件<br>
+          如果你愿意付费，请联系QQ：564020069（付费后提供远程协助部署安装服务）<br><br>
+          如果你不愿意付费，你可以用自己的模型api，如果你不知道模型api是什么<br>
+          可以直接跟龙虾说：<br>
+          AlphaMaster这个程序的模型api有什么作用，该怎么填？<br>
+          请教我填上Deepseek官方的模型API接口
+        </div>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-primary" data-close-unlimited>知道了</button>
+        </div>
+      </div>
+    </div>
     </div><!-- /page-train -->
 
     <!-- ══════════════ 步骤二：回测页 ══════════════ -->
@@ -185,7 +226,18 @@
               <button class="btn btn-danger" id="btStopBtn" disabled>停止</button>
             </div>
           </div>
-          <small class="field-hint">默认使用训练页对应品种的 <code>strategies/best_{品种}.json</code>；也可选择「导出策略」下载的 JSON 文件。</small>
+          <div class="launch-row bt-cost-row">
+            <label class="bt-cost-field">
+              <span>手续费（单边 %）</span>
+              <input type="number" id="btCommissionInput" min="0" max="5" step="0.01" value="0.02" />
+            </label>
+            <label class="bt-cost-field">
+              <span>滑点（单边 %）</span>
+              <input type="number" id="btSlippageInput" min="0" max="5" step="0.01" value="0.01" />
+            </label>
+            <span class="bt-cost-sum" id="btCostSumHint">合计单边成本 0.03%</span>
+          </div>
+          <small class="field-hint">单边手续费/滑点，开平仓各扣一次。默认手续费 0.02%、滑点 0.01%。策略默认 <code>strategies/best_{品种}.json</code>。</small>
         </div>
       </section>
 
@@ -198,7 +250,7 @@
           <span class="hint" id="btPortfolioHint">尚未运行回测</span>
         </div>
         <div class="metric-grid" id="btPortfolioGrid">
-          <div class="metric-empty">运行回测后显示收益、夏普、回撤等指标</div>
+          <div class="metric-empty">运行回测后显示收益、夏普、盈亏比等指标</div>
         </div>
       </section>
 
@@ -219,14 +271,13 @@
                   <th>收益</th>
                   <th>Sharpe</th>
                   <th>Sortino</th>
-                  <th>最大回撤</th>
-                  <th>Calmar</th>
+                  <th>盈亏比</th>
                   <th>交易数</th>
                   <th>胜率</th>
                 </tr>
               </thead>
               <tbody id="btTableBody">
-                <tr class="empty-row"><td colspan="8">暂无回测结果</td></tr>
+                <tr class="empty-row"><td colspan="7">暂无回测结果</td></tr>
               </tbody>
             </table>
           </div>
@@ -248,27 +299,73 @@
         </section>
       </div>
 
-      <!-- 资金曲线图库 -->
+      <!-- 资金曲线（交互式 HTML 图表） -->
       <section class="panel bt-charts-panel">
         <span class="hud-corner tl"></span><span class="hud-corner tr"></span>
         <span class="hud-corner bl"></span><span class="hud-corner br"></span>
         <div class="panel-head">
           <h2>资金曲线</h2>
-          <span class="hint" id="btChartsHint">回测完成后展示选中品种的资金曲线与交易图</span>
+          <span class="hint" id="btChartsHint">回测完成后展示资金曲线</span>
         </div>
-        <div class="chart-gallery" id="btChartGallery">
-          <div class="metric-empty">暂无图表</div>
+
+        <div class="equity-live" id="btEquityLive" hidden>
+          <div class="equity-stats" id="btEquityStats"></div>
+          <div class="equity-chart-block">
+            <div class="equity-axis-label">累计对数收益</div>
+            <div class="equity-chart-wrap">
+              <canvas id="btEquityChart"></canvas>
+            </div>
+          </div>
+          <div class="equity-chart-block roll">
+            <div class="equity-axis-label" id="btRollingLabel">滚动夏普 · Rolling Sharpe</div>
+            <div class="equity-chart-wrap roll">
+              <canvas id="btRollingChart"></canvas>
+            </div>
+          </div>
         </div>
+
+        <div class="metric-empty" id="btEquityEmpty">回测完成后展示资金曲线</div>
+
+        <details class="chart-metrics-help bt-howto" open>
+          <summary>回测是怎么算的？（一看就懂）</summary>
+          <ol class="bt-howto-list">
+            <li>
+              <strong>先拿历史行情“假装交易”</strong>
+              <p>回测不会真的下单。它把过去很多天的价格拿出来，按策略规则一步步走一遍，看看如果当时真做了，钱会变多还是变少。</p>
+            </li>
+            <li>
+              <strong>因子先打一个“信号分”</strong>
+              <p>策略公式会给每一根 K 线打分：正分偏向看涨，负分偏向看跌，靠近 0 就先别乱动。</p>
+              <p>分数的绝对值越大，信号就越明确。比如 +3 比 +0.2 更坚决地看涨，-3 比 -0.2 更坚决地看跌。</p>
+            </li>
+            <li>
+              <strong>信号分越大，仓位就越大</strong>
+              <p>仓位不是只有“全仓 / 空仓”两档，而是用 <code>tanh(信号分)</code> 压到大约 -1 到 +1 之间。</p>
+              <ul>
+                <li>正分越大 → 做多越多（最多接近满仓 +1）</li>
+                <li>负分越小 → 做空越多（最多接近满仓 -1）</li>
+                <li>分数很弱 → 仓位接近 0（几乎不持仓）</li>
+              </ul>
+              <p>可以把它想成：信心越大，下注越多；但再大也不会超过“一整份仓位”。</p>
+            </li>
+            <li>
+              <strong>赚亏怎么算</strong>
+              <p>这一步大概赚多少 ≈ 仓位 × 价格涨跌。仓位大，涨了赚得多，跌了也亏得多。换仓时还会扣掉你设的手续费和滑点。</p>
+            </li>
+            <li>
+              <strong>上面那些图在说什么</strong>
+              <ul>
+                <li>资金曲线：把每一步赚亏累加起来，看账户是往上爬还是往下掉。</li>
+                <li>滚动夏普：看最近一段时间“赚得稳不稳”，越高通常越好。</li>
+              </ul>
+            </li>
+          </ol>
+        </details>
       </section>
     </div><!-- /page-backtest -->
   </div>
 
-  <!-- 图片灯箱 -->
-  <div class="lightbox" id="lightbox">
-    <img id="lightboxImg" src="" alt="资金曲线" />
-  </div>
-
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=19"></script>
+  <script src="/static/app.js?v=36"></script>
 </body>
 </html>
