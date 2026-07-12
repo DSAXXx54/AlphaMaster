@@ -67,6 +67,7 @@ app.add_middleware(
 
 class StartTrainingRequest(BaseModel):
     data_file: str
+    from_scratch: bool = False
 
 
 class ClientLogRequest(BaseModel):
@@ -467,12 +468,21 @@ def _progress_with_live_step(symbol: str, active: bool) -> dict[str, Any]:
             current_step = max(current_step, live)
     train_steps = p.train_steps
     progress_pct = min(100.0, 100.0 * current_step / train_steps) if train_steps > 0 else 0.0
+    val_score = None
+    hist = p.history or {}
+    vals = hist.get("val_score") or []
+    if vals:
+        try:
+            val_score = float(vals[-1])
+        except (TypeError, ValueError):
+            val_score = None
     return {
         "symbol": p.symbol,
         "current_step": current_step,
         "train_steps": train_steps,
         "progress_pct": round(progress_pct, 1),
         "best_score": p.best_score,
+        "val_score": val_score,
         "formula_decoded": p.formula_decoded,
         "status": p.status,
         "history": p.history,
@@ -499,6 +509,7 @@ def api_overview() -> dict[str, Any]:
                 "train_steps": row["train_steps"],
                 "progress_pct": row["progress_pct"],
                 "best_score": row["best_score"],
+                "val_score": row.get("val_score"),
                 "formula_decoded": row["formula_decoded"],
                 "has_checkpoint": row.get("has_checkpoint", False),
                 "has_strategy": row.get("has_strategy", False),
@@ -517,6 +528,7 @@ def api_overview() -> dict[str, Any]:
             "train_steps": row["train_steps"],
             "progress_pct": row["progress_pct"],
             "best_score": row["best_score"],
+            "val_score": row.get("val_score"),
             "formula_decoded": row["formula_decoded"],
             "has_checkpoint": row.get("has_checkpoint", False),
             "has_strategy": row.get("has_strategy", False),
@@ -637,10 +649,18 @@ def api_training_start(req: StartTrainingRequest) -> dict[str, Any]:
             symbol=info["symbol"],
             timeframe=info["timeframe"],
             mode="ftmo",
+            from_scratch=bool(req.from_scratch),
         )
     except RuntimeError as e:
         raise HTTPException(409, str(e)) from e
-    return {"ok": True, "job": job.to_dict(), "data_file": info}
+    if req.from_scratch:
+        invalidate_checkpoint_cache()
+    return {
+        "ok": True,
+        "job": job.to_dict(),
+        "data_file": info,
+        "from_scratch": bool(req.from_scratch),
+    }
 
 
 @app.post("/api/training/stop")

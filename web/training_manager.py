@@ -82,6 +82,8 @@ class TrainingManager:
         symbol: str,
         timeframe: str,
         mode: str = "ftmo",
+        *,
+        from_scratch: bool = False,
     ) -> TrainingJob:
         with self._lock:
             self._refresh_state()
@@ -106,6 +108,8 @@ class TrainingManager:
                 "--data-file",
                 data_file,
             ]
+            if from_scratch:
+                cmd.append("--from-scratch")
 
             self._log_fp = open(log_path, "w", encoding="utf-8", buffering=1)
             env = os.environ.copy()

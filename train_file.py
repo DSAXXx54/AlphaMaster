@@ -28,7 +28,7 @@ from model_core.engine import AlphaEngine
 from model_core.vocab import VOCAB_VERSION
 
 
-def train_from_file(data_file: str) -> AlphaEngine | None:
+def train_from_file(data_file: str, *, from_scratch: bool = False) -> AlphaEngine | None:
     info = inspect_parquet_file(data_file)
     symbol = info["symbol"]
     timeframe = info["timeframe"]
@@ -40,6 +40,7 @@ def train_from_file(data_file: str) -> AlphaEngine | None:
     print(f"  周期: {timeframe}")
     print(f"  训练步数: {ModelConfig.TRAIN_STEPS}")
     print(f"  K线数: {info['bars']}")
+    print(f"  模式: {'重新训练（从头）' if from_scratch else '自动续训'}")
     print(f"{'='*60}")
 
     try:
@@ -57,7 +58,25 @@ def train_from_file(data_file: str) -> AlphaEngine | None:
     ckpt_files = sorted(_glob.glob(ckpt_pattern))
     start_step = 0
 
-    if ckpt_files:
+    if from_scratch:
+        removed = 0
+        for p in ckpt_files:
+            try:
+                pathlib.Path(p).unlink(missing_ok=True)
+                removed += 1
+            except OSError as e:
+                print(f"  [警告] 无法删除检查点 {p}: {e}")
+        hist_path = pathlib.Path(f"training_history_{symbol}.json")
+        if hist_path.exists():
+            try:
+                hist_path.unlink()
+            except OSError:
+                pass
+        print(f"  [重新训练] 已清除 {removed} 个检查点，从第 0 步开始")
+        # 保留已有最优策略作为分数下限，避免开局弱公式覆盖 strategies/best_*.json
+        _seed_best_from_strategy(engine, symbol)
+        ckpt_files = []
+    elif ckpt_files:
         latest = ckpt_files[-1]
         try:
             start_step = engine.load_checkpoint(latest)
@@ -70,7 +89,7 @@ def train_from_file(data_file: str) -> AlphaEngine | None:
         _save_strategy(engine, symbol, timeframe, data_file)
         return engine
 
-    if start_step == 0:
+    if start_step == 0 and not from_scratch:
         hist_path = pathlib.Path(f"training_history_{symbol}.json")
         if hist_path.exists():
             hist_path.unlink()
@@ -84,9 +103,44 @@ def train_from_file(data_file: str) -> AlphaEngine | None:
     return engine
 
 
+def _seed_best_from_strategy(engine: AlphaEngine, symbol: str) -> None:
+    """把已有 best_{symbol}.json 当作重新训练的分数下限。"""
+    path = pathlib.Path("strategies") / f"best_{symbol}.json"
+    if not path.exists():
+        return
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as e:
+        print(f"  [警告] 读取已有策略失败: {e}")
+        return
+    formula = data.get("formula")
+    score = data.get("best_score")
+    if not formula or score is None:
+        return
+    try:
+        engine.best_formula = [int(t) for t in formula]
+        engine.best_score = float(score)
+        print(f"  [重新训练] 保留已有最优分数下限={engine.best_score:.4f}，仅更好时才会覆盖策略文件")
+    except (TypeError, ValueError) as e:
+        print(f"  [警告] 已有策略无法用作下限: {e}")
+
+
 def _save_strategy(engine: AlphaEngine, symbol: str, timeframe: str, data_file: str) -> None:
     path = pathlib.Path("strategies") / f"best_{symbol}.json"
     path.parent.mkdir(exist_ok=True)
+    # 若磁盘上已有更高分，不要用更弱结果覆盖
+    if path.exists() and engine.best_formula is not None:
+        try:
+            old = json.loads(path.read_text(encoding="utf-8"))
+            old_score = old.get("best_score")
+            if old_score is not None and float(old_score) > float(engine.best_score):
+                print(
+                    f"  [策略] 保留磁盘更优结果 {float(old_score):.4f} "
+                    f"> 本次 {float(engine.best_score):.4f}，未覆盖 {path}"
+                )
+                return
+        except (json.JSONDecodeError, OSError, TypeError, ValueError):
+            pass
     data = {
         "vocab_version": VOCAB_VERSION,
         "symbol": symbol,
@@ -108,7 +162,7 @@ if __name__ == "__main__":
     ModelConfig.REWARD_MODE = "ftmo"
 
     if "--data-file" not in sys.argv:
-        print("用法: python train_file.py --data-file PATH\\TO\\SYMBOL_TF.parquet")
+        print("用法: python train_file.py --data-file PATH\\TO\\SYMBOL_TF.parquet [--from-scratch]")
         print("示例: python train_file.py --data-file D:\\K线数据\\AAPL_H1.parquet")
         sys.exit(1)
 
@@ -118,8 +172,9 @@ if __name__ == "__main__":
         sys.exit(1)
 
     data_file = sys.argv[idx + 1]
+    from_scratch = "--from-scratch" in sys.argv
     t0 = time.time()
-    eng = train_from_file(data_file)
+    eng = train_from_file(data_file, from_scratch=from_scratch)
     elapsed = time.time() - t0
 
     if eng:

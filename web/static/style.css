@@ -438,6 +438,7 @@ select:focus { border-color: var(--accent); }
 .launch-actions {
   display: flex;
   flex-wrap: wrap;
+  align-items: center;
   gap: 10px;
   margin-left: auto;
 }
@@ -547,6 +548,33 @@ select:focus { border-color: var(--accent); }
 
 .launch-row .launch-actions { margin-left: auto; }
 
+/* 主行：选择按钮与信息卡等高并排 */
+.launch-row-main { align-items: stretch; }
+
+.btn-browse {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  white-space: nowrap;
+}
+
+/* 操作按钮独占一行（训练页）：不再右推，左对齐成组 */
+.launch-form-file > .launch-actions {
+  margin-left: 0;
+  margin-top: 2px;
+}
+
+/* 控制组 / 文件操作组之间的竖线分隔 */
+.action-sep {
+  align-self: stretch;
+  width: 1px;
+  min-height: 22px;
+  margin: 0 5px;
+  background: var(--border-strong);
+  opacity: 0.7;
+}
+
 .bt-cost-row {
   align-items: flex-end;
   gap: 14px;
@@ -600,10 +628,15 @@ select:focus { border-color: var(--accent); }
 .data-file-card {
   flex: 1 1 280px;
   min-width: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  min-height: 50px;
   background: rgba(14, 20, 31, 0.6);
   border: 1px dashed var(--border-strong);
   border-radius: 10px;
-  padding: 9px 13px;
+  padding: 7px 16px;
   transition: border-color 0.2s, box-shadow 0.2s;
 }
 
@@ -617,34 +650,53 @@ select:focus { border-color: var(--accent); }
 
 .data-file-empty { color: var(--text-muted); font-size: 0.85rem; }
 
+/* 信息卡：仪表盘统计条（每个指标竖向小格 + 细竖线分隔）*/
 .data-file-row {
   display: flex;
   align-items: center;
-  gap: 16px;
+  gap: 0;
   flex-wrap: wrap;
   font-size: 0.85rem;
 }
 
-.data-file-row .item { display: flex; align-items: baseline; gap: 6px; white-space: nowrap; }
+.data-file-row .item {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 2px 13px;
+  border-left: 1px solid var(--border);
+  white-space: nowrap;
+}
+.data-file-row .item:first-child { border-left: none; padding-left: 2px; }
 
 .data-file-row .label {
-  font-size: 0.68rem;
+  font-size: 0.6rem;
   color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.04em;
+  letter-spacing: 0.08em;
 }
 
-.data-file-row .value { font-family: var(--mono); color: var(--text); }
-.data-file-row .value.sym { font-weight: 600; color: var(--accent); text-shadow: 0 0 12px var(--accent-glow); }
-
-.data-file-row .path {
+.data-file-row .value {
   font-family: var(--mono);
-  font-size: 0.72rem;
+  font-size: 0.95rem;
+  line-height: 1.1;
+  color: var(--text);
+}
+.data-file-row .value.sym { font-weight: 600; color: var(--accent); text-shadow: 0 0 12px var(--accent-glow); }
+.data-file-row .value.score-best { color: #34f5c8; font-weight: 600; }
+.data-file-row .value.score-val { color: #38bdf8; font-weight: 600; }
+
+/* 文件名：独立一行放在指标条下方，带顶部细分割线，避免右侧留白 */
+.data-file-card > .path {
+  margin-top: 4px;
+  padding-top: 5px;
+  border-top: 1px solid var(--border);
+  font-family: var(--mono);
+  font-size: 0.7rem;
   color: var(--text-muted);
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  max-width: 200px;
 }
 
 .data-file-error { color: var(--danger); font-size: 0.82rem; }

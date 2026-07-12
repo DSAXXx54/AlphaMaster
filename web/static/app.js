@@ -176,6 +176,7 @@ function renderDataFileCard(info) {
     selectedDataFile = null;
     selectedSymbol = null;
     startBtn.disabled = true;
+    if ($("retrainBtn")) $("retrainBtn").disabled = true;
     if ($("exportBtn")) $("exportBtn").disabled = true;
     if ($("exportTrainingBtn")) $("exportTrainingBtn").disabled = true;
     if ($("importTrainingBtn")) $("importTrainingBtn").disabled = true;
@@ -192,22 +193,29 @@ function renderDataFileCard(info) {
       <div class="data-file-path">${info.data_file}</div>
     `;
     startBtn.disabled = true;
+    if ($("retrainBtn")) $("retrainBtn").disabled = true;
     if ($("exportTrainingBtn")) $("exportTrainingBtn").disabled = true;
     if ($("importTrainingBtn")) $("importTrainingBtn").disabled = true;
     return;
   }
 
   card.className = "data-file-card valid";
+  const yearsText = info.years_h1 != null ? `${info.years_h1} 年` : "—";
   card.innerHTML = `
     <div class="data-file-row">
       <div class="item"><span class="label">品种</span><span class="value sym">${info.symbol}</span></div>
       <div class="item"><span class="label">周期</span><span class="value">${info.timeframe}</span></div>
       <div class="item"><span class="label">K线</span><span class="value">${info.bars?.toLocaleString()}</span></div>
+      <div class="item"><span class="label">数据年限</span><span class="value">${yearsText}</span></div>
       <div class="item"><span class="label">进度</span><span class="value" id="fileProgressPct">—</span></div>
-      <span class="path" title="${info.data_file}">${info.filename || info.data_file}</span>
+      <div class="item"><span class="label">已训练</span><span class="value" id="fileElapsedTime">—</span></div>
+      <div class="item"><span class="label">最优分数</span><span class="value score-best" id="fileBestScore">—</span></div>
+      <div class="item"><span class="label">验证分数</span><span class="value score-val" id="fileValScore">—</span></div>
     </div>
+    <div class="path" title="${info.data_file}">${info.filename || info.data_file}</div>
   `;
   startBtn.disabled = false;
+  if ($("retrainBtn")) $("retrainBtn").disabled = false;
 }
 
 function updateBtStartBtn() {
@@ -248,21 +256,50 @@ function renderStrategyFileCard(info) {
   selectedStrategyFile = info.strategy_file;
   selectedStrategySymbol = info.symbol || null;
   card.className = "data-file-card valid";
+  const timeframeItem = info.timeframe
+    ? `<div class="item"><span class="label">周期</span><span class="value">${info.timeframe}</span></div>`
+    : "";
   card.innerHTML = `
     <div class="data-file-row">
       <div class="item"><span class="label">品种</span><span class="value sym">${info.symbol || "—"}</span></div>
-      <div class="item"><span class="label">分数</span><span class="value">${formatScore(info.best_score)}</span></div>
-      <div class="item"><span class="label">版本</span><span class="value">${info.vocab_version || "—"}</span></div>
-      <span class="path" title="${info.strategy_file}">${info.filename || info.strategy_file}</span>
+      ${timeframeItem}
+      <div class="item"><span class="label">最优分数</span><span class="value score-best">${formatScore(info.best_score)}</span></div>
+      <div class="item"><span class="label">词表版本</span><span class="value">${info.vocab_version || "—"}</span></div>
+      <div class="item"><span class="label">公式长度</span><span class="value">${info.formula_decoded ? info.formula_decoded.split("→").length : "—"}</span></div>
     </div>
+    <div class="path" title="${info.strategy_file}">${info.filename || info.strategy_file}</div>
   `;
   updateBtStartBtn();
 }
 
+function formatElapsed(startedAtIso) {
+  if (!startedAtIso) return "—";
+  const started = new Date(startedAtIso).getTime();
+  if (Number.isNaN(started)) return "—";
+  const secs = Math.max(0, Math.floor((Date.now() - started) / 1000));
+  const h = Math.floor(secs / 3600);
+  const m = Math.floor((secs % 3600) / 60);
+  if (h > 0) return `${h}小时${m}分`;
+  return `${m}分钟`;
+}
+
 function updateFileProgress(progress) {
   const el = document.getElementById("fileProgressPct");
-  if (!el || !progress) return;
-  el.textContent = `${progress.current_step} / ${progress.train_steps} (${progress.progress_pct}%)`;
+  if (el && progress) {
+    el.textContent = `${progress.current_step} / ${progress.train_steps} (${progress.progress_pct}%)`;
+  }
+  const bestEl = document.getElementById("fileBestScore");
+  if (bestEl) {
+    bestEl.textContent = progress ? formatScore(progress.best_score) : "—";
+  }
+  const valEl = document.getElementById("fileValScore");
+  if (valEl) {
+    let val = progress?.val_score;
+    if (val == null && progress?.history?.val_score?.length) {
+      val = progress.history.val_score[progress.history.val_score.length - 1];
+    }
+    valEl.textContent = progress ? formatScore(val) : "—";
+  }
 }
 
 const CHART_SERIES = [
@@ -465,14 +502,19 @@ function updateTrainingUI(training) {
   const active = training?.active;
   const pill = $("jobPill");
   const startBtn = $("startBtn");
+  const retrainBtn = $("retrainBtn");
   const stopBtn = $("stopBtn");
+
+  const elapsedEl = $("fileElapsedTime");
 
   if (!job || job.state === "idle") {
     pill.innerHTML = '<i class="pill-dot"></i>空闲';
     pill.className = "pill";
     startBtn.disabled = !selectedDataFile;
+    if (retrainBtn) retrainBtn.disabled = !selectedDataFile;
     stopBtn.disabled = true;
     $("logHint").textContent = "—";
+    if (elapsedEl) elapsedEl.textContent = "—";
     return;
   }
 
@@ -488,8 +530,13 @@ function updateTrainingUI(training) {
   pill.className = "pill " + (job.state === "running" ? "running" : job.state);
 
   startBtn.disabled = active;
+  if (retrainBtn) retrainBtn.disabled = active;
   stopBtn.disabled = !active;
   $("logHint").textContent = job.log_path || "—";
+  if (elapsedEl) {
+    const elapsed = formatElapsed(job.started_at);
+    elapsedEl.textContent = active || elapsed === "—" ? elapsed : `${elapsed}（已停）`;
+  }
 
   const logView = $("logView");
   const atBottom = isViewAtBottom(logView);
@@ -798,7 +845,32 @@ async function startTraining() {
     const res = await fetchJSON("/api/training/start", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ data_file: selectedDataFile }),
+      body: JSON.stringify({ data_file: selectedDataFile, from_scratch: false }),
+    });
+    selectedSymbol = res.data_file?.symbol || res.job?.symbol;
+    renderDataFileCard(res.data_file);
+    await refreshOverview();
+  } catch (e) {
+    $("debugView").scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }
+}
+
+async function retrainFromScratch() {
+  if (!selectedDataFile) {
+    await logClientError("请先选择数据文件");
+    return;
+  }
+  const ok = window.confirm(
+    "重新训练会清除该品种的检查点，从第 0 步重新搜索。\n" +
+      "已有的更优策略会保留，只有挖到更高分才会覆盖。\n\n" +
+      "确定要重新训练吗？"
+  );
+  if (!ok) return;
+  try {
+    const res = await fetchJSON("/api/training/start", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ data_file: selectedDataFile, from_scratch: true }),
     });
     selectedSymbol = res.data_file?.symbol || res.job?.symbol;
     renderDataFileCard(res.data_file);
@@ -2176,6 +2248,7 @@ async function init() {
   }
   $("browseBtn").addEventListener("click", browseDataFile);
   $("startBtn").addEventListener("click", startTraining);
+  if ($("retrainBtn")) $("retrainBtn").addEventListener("click", retrainFromScratch);
   $("stopBtn").addEventListener("click", stopTraining);
   $("exportBtn").addEventListener("click", exportStrategy);
   $("exportTrainingBtn").addEventListener("click", exportTraining);

@@ -4,14 +4,12 @@
   "formula": [
     39,
     89,
+    97,
     4,
     87,
-    21,
-    115,
-    87,
-    115
+    31,
+    126,
+    121
   ],
-  "best_score": 1.3544840812683105,
-  "formula_decoded": "YANG_ZHANG_VOL → TS_MAX_10 → SLOPE20 → MOMENTUM_5 → BOLL_POS → MIN → MOMENTUM_5 → MIN",
-  "train_step": 0
+  "best_score": 1.4946367740631104
 }
