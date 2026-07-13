@@ -703,11 +703,12 @@ async function initAiPanel(cfg) {
 
 function resolveAiFromKey(raw) {
   const v = (raw || "").trim().toLowerCase();
-  if (v === "openclaw" || v.startsWith("openclaw/")) {
-    return { provider: "openclaw", apiKey: raw.trim(), isAlias: true };
-  }
+  // openclaw_wb 必须先于 openclaw，避免前缀误匹配
   if (v === "openclaw_wb" || v.startsWith("openclaw_wb/")) {
     return { provider: "openclaw_wb", apiKey: raw.trim(), isAlias: true };
+  }
+  if (v === "openclaw" || v.startsWith("openclaw/")) {
+    return { provider: "openclaw", apiKey: raw.trim(), isAlias: true };
   }
   return { provider: "deepseek", apiKey: (raw || "").trim(), isAlias: false };
 }

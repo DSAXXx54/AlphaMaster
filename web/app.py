@@ -401,10 +401,11 @@ def api_ai_analyze_training(req: AnalyzeTrainingRequest):
     raw_key = req.api_key if req.api_key is not None else settings.get("ai_api_key") or ""
     key_lower = str(raw_key).strip().lower()
 
-    if key_lower in ("openclaw",) or key_lower.startswith("openclaw/"):
-        provider = "openclaw"
-    elif key_lower in ("openclaw_wb",) or key_lower.startswith("openclaw_wb/"):
+    # openclaw_wb 必须先于 openclaw 判断
+    if key_lower in ("openclaw_wb",) or key_lower.startswith("openclaw_wb/"):
         provider = "openclaw_wb"
+    elif key_lower in ("openclaw",) or key_lower.startswith("openclaw/"):
+        provider = "openclaw"
     else:
         provider = (req.provider or settings.get("ai_provider") or "deepseek").strip()
 

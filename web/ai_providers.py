@@ -35,6 +35,16 @@ _WORKBUDDY_CONFIG_DIR = Path(
     os.environ.get("WORKBUDDY_CONFIG_DIR", "") or (Path.home() / ".workbuddy")
 )
 _WORKBUDDY_TOKEN_FILE = _WORKBUDDY_CONFIG_DIR / ".wb_token"
+_WORKBUDDY_SESSION_PATH = _WORKBUDDY_CONFIG_DIR / "app" / "session"
+_WORKBUDDY_LOCAL_STATE = _WORKBUDDY_SESSION_PATH / "Local State"
+_WORKBUDDY_AUTH_EXPECTED = (
+    Path(os.environ.get("LOCALAPPDATA", "") or Path.home() / "AppData" / "Local")
+    / "CodeBuddyExtension"
+    / "Data"
+    / "Public"
+    / "auth"
+    / "workbuddy-desktop.info"
+)
 
 PROVIDERS = ("deepseek", "openclaw", "openclaw_wb")
 
@@ -49,7 +59,11 @@ class ResolvedProvider:
     needs_user_key: bool = False
 
 
-def detect_qclaw() -> bool:
+def detect_qclaw(*, require_alive: bool = False) -> bool:
+    """True when local QClaw config looks usable.
+
+    When *require_alive* is True, also require the gateway /models probe to succeed.
+    """
     info = _qclaw_gateway_info()
     if info is None:
         return False
@@ -65,7 +79,13 @@ def detect_qclaw() -> bool:
         .get("endpoints", {})
         .get("chatCompletions", {})
     )
-    return bool(chat.get("enabled", False)) and bool(info[2])
+    if not (bool(chat.get("enabled", False)) and bool(info[2])):
+        return False
+    if not require_alive:
+        return True
+    host, port, token = info
+    base = f"http://{host}:{port}/v1"
+    return _pick_openclaw_model(base, token, probe_only=True)
 
 
 def detect_workbuddy() -> bool:
@@ -79,8 +99,26 @@ def detect_workbuddy() -> bool:
 
 
 def provider_status() -> dict[str, Any]:
-    qclaw_ok = detect_qclaw()
+    qclaw_cfg = detect_qclaw(require_alive=False)
+    qclaw_ok = detect_qclaw(require_alive=True) if qclaw_cfg else False
     wb_ok = bool(_workbuddy_token())
+    wb_env = detect_workbuddy()
+    if qclaw_ok:
+        qclaw_hint = "已检测到本地 QClaw Gateway（可连通）"
+    elif qclaw_cfg:
+        qclaw_hint = "已找到 QClaw 配置，但 Gateway 未启动（请先打开 QClaw）"
+    else:
+        qclaw_hint = "未检测到 QClaw（需 ~/.qclaw/openclaw.json 且 chatCompletions 已启用）"
+    if wb_ok:
+        wb_hint = "已自动读取 WorkBuddy 登录 token"
+    elif wb_env:
+        wb_hint = (
+            "已检测到 WorkBuddy，但未找到登录 token。"
+            f"请打开 WorkBuddy 并登录（会话文件：{_WORKBUDDY_AUTH_EXPECTED}），"
+            "或设置 WORKBUDDY_API_TOKEN / 写入 ~/.workbuddy/.wb_token"
+        )
+    else:
+        wb_hint = "未检测到 WorkBuddy（请先安装并登录 WorkBuddy）"
     return {
         "providers": [
             {
@@ -95,38 +133,40 @@ def provider_status() -> dict[str, Any]:
                 "label": "openclaw (QClaw)",
                 "available": qclaw_ok,
                 "needs_user_key": False,
-                "hint": (
-                    "已检测到本地 QClaw Gateway"
-                    if qclaw_ok
-                    else "未检测到 QClaw（需 ~/.qclaw/openclaw.json 且 chatCompletions 已启用）"
-                ),
+                "hint": qclaw_hint,
             },
             {
                 "id": "openclaw_wb",
                 "label": "openclaw_wb (WorkBuddy)",
                 "available": wb_ok,
                 "needs_user_key": False,
-                "hint": (
-                    "已读取 WorkBuddy 登录 token"
-                    if wb_ok
-                    else "未检测到 WorkBuddy token（请先登录 WorkBuddy 或设置 WORKBUDDY_API_TOKEN）"
-                ),
+                "hint": wb_hint,
             },
         ]
     }
+
+
+def _alias_provider_from_key(api_key: str | None) -> str | None:
+    """Map Key 输入里的 openclaw / openclaw_wb 别名到通道 id。"""
+    key_lower = (api_key or "").strip().lower()
+    if not key_lower:
+        return None
+    # openclaw_wb 必须先于 openclaw，避免被 openclaw 前缀误伤
+    if key_lower in ("openclaw_wb",) or key_lower.startswith("openclaw_wb/"):
+        return "openclaw_wb"
+    if key_lower in ("openclaw",) or key_lower.startswith("openclaw/"):
+        return "openclaw"
+    return None
 
 
 def resolve_provider(provider: str, api_key: str | None = None) -> ResolvedProvider:
     pid = (provider or "deepseek").strip().lower()
     key = (api_key or "").strip()
 
-    # API Key 里直接填 openclaw / openclaw_wb 时，自动切换通道
-    key_lower = key.lower()
-    if key_lower in ("openclaw",) or key_lower.startswith("openclaw/"):
-        pid = "openclaw"
-        key = ""
-    elif key_lower in ("openclaw_wb",) or key_lower.startswith("openclaw_wb/"):
-        pid = "openclaw_wb"
+    # API Key 里直接填 openclaw / openclaw_wb 时，自动切换通道并读取本地 token
+    aliased = _alias_provider_from_key(key)
+    if aliased:
+        pid = aliased
         key = ""
 
     if pid not in PROVIDERS:
@@ -145,14 +185,19 @@ def resolve_provider(provider: str, api_key: str | None = None) -> ResolvedProvi
         )
 
     if pid == "openclaw":
-        if not detect_qclaw():
+        info = _qclaw_gateway_info()
+        if info is None or not detect_qclaw(require_alive=False):
             raise ValueError(
-                "未检测到本地 QClaw Gateway。请确认 QClaw 正在运行，"
+                "未检测到本地 QClaw。请确认已安装 QClaw，"
                 "且 ~/.qclaw/openclaw.json 中 chatCompletions 已启用、token 已配置。"
             )
-        host, port, token = _qclaw_gateway_info()  # type: ignore[misc]
+        host, port, token = info
         base = f"http://{host}:{port}/v1"
-        model = _pick_openclaw_model(base, token)
+        if not _pick_openclaw_model(base, token, probe_only=True):
+            raise ValueError(
+                f"已读取 QClaw token，但 Gateway 未连通（{base}）。请先启动 QClaw 后再试。"
+            )
+        model = str(_pick_openclaw_model(base, token) or _OPENCLAW_MODEL)
         return ResolvedProvider(
             provider="openclaw",
             model=model,
@@ -162,13 +207,10 @@ def resolve_provider(provider: str, api_key: str | None = None) -> ResolvedProvi
             needs_user_key=False,
         )
 
-    # openclaw_wb
+    # openclaw_wb：自动从 WorkBuddy 会话 / .wb_token / 环境变量 / Electron DPAPI 读取
     token = _workbuddy_token()
     if not token:
-        raise ValueError(
-            "未检测到 WorkBuddy token。请先登录 WorkBuddy，"
-            "或设置环境变量 WORKBUDDY_API_TOKEN / 写入 ~/.workbuddy/.wb_token。"
-        )
+        raise ValueError(_workbuddy_token_missing_message())
     endpoint = _workbuddy_endpoint()
     base = f"{endpoint.rstrip('/')}{_WORKBUDDY_API_PATH}"
     return ResolvedProvider(
@@ -302,7 +344,14 @@ def _qclaw_gateway_info() -> tuple[str, int, str] | None:
     return host, port, token
 
 
-def _pick_openclaw_model(base_url: str, token: str) -> str:
+def _pick_openclaw_model(
+    base_url: str, token: str, *, probe_only: bool = False
+) -> str | bool:
+    """Probe QClaw /models.
+
+    When *probe_only* is True, return whether the gateway responded.
+    Otherwise return a preferred model id (falls back to ``openclaw``).
+    """
     try:
         import urllib.request
 
@@ -313,6 +362,8 @@ def _pick_openclaw_model(base_url: str, token: str) -> str:
         )
         with urllib.request.urlopen(req, timeout=2.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
+        if probe_only:
+            return True
         ids = [str(m.get("id", "")) for m in data.get("data", []) if m.get("id")]
         if _OPENCLAW_MODEL in ids:
             return _OPENCLAW_MODEL
@@ -321,33 +372,52 @@ def _pick_openclaw_model(base_url: str, token: str) -> str:
                 return mid
     except Exception as exc:
         logger.debug("QClaw /models probe failed: %s", exc)
-    return _OPENCLAW_MODEL
+        if probe_only:
+            return False
+    return False if probe_only else _OPENCLAW_MODEL
 
 
-def _workbuddy_auth_dir() -> Path | None:
+def _workbuddy_auth_dirs() -> list[Path]:
+    """Candidate directories where WorkBuddy stores FileAuthenticationStorage sessions."""
     local_app = os.environ.get("LOCALAPPDATA", "").strip()
-    if not local_app:
-        return None
-    auth_dir = Path(local_app) / "CodeBuddyExtension" / "Data" / "Public" / "auth"
-    return auth_dir if auth_dir.is_dir() else None
+    home = Path.home()
+    roots: list[Path] = []
+    if local_app:
+        roots.append(Path(local_app))
+    roots.append(home / "AppData" / "Local")
+    names = ("CodeBuddyExtension", "WorkBuddyExtension")
+    out: list[Path] = []
+    for root in roots:
+        for name in names:
+            auth_dir = root / name / "Data" / "Public" / "auth"
+            if auth_dir.is_dir() and auth_dir not in out:
+                out.append(auth_dir)
+    return out
 
 
 def _workbuddy_auth_session_candidates() -> list[Path]:
-    auth_dir = _workbuddy_auth_dir()
-    if auth_dir is None:
-        return []
-    names = (
+    preferred = (
         os.environ.get("WORKBUDDY_AUTH_FILE", "").strip(),
         "workbuddy-desktop.info",
         "auth.info",
     )
     out: list[Path] = []
-    for name in names:
-        if not name:
-            continue
-        path = auth_dir / name
-        if path.exists() and path not in out:
-            out.append(path)
+    for auth_dir in _workbuddy_auth_dirs():
+        for name in preferred:
+            if not name:
+                continue
+            path = auth_dir / name
+            if path.exists() and path not in out:
+                out.append(path)
+        # timestamped backups from logout: workbuddy-desktop.2026-....info
+        try:
+            for path in sorted(auth_dir.glob("*.info"), key=lambda p: p.stat().st_mtime, reverse=True):
+                if path.name.endswith(".logged-out"):
+                    continue
+                if path not in out:
+                    out.append(path)
+        except OSError:
+            pass
     return out
 
 
@@ -366,26 +436,201 @@ def _read_workbuddy_auth_token(path: Path) -> str | None:
         import time
 
         if expires_at <= time.time() * 1000:
+            logger.debug("WorkBuddy auth session expired: %s", path)
             return None
     return token
 
 
+def _workbuddy_token_missing_message() -> str:
+    expected = _WORKBUDDY_AUTH_EXPECTED
+    lines = [
+        "未检测到 WorkBuddy token。",
+        "输入 openclaw_wb 时会自动从本地登录会话读取，请确认：",
+        "1. 已打开 WorkBuddy 并完成登录",
+        f"2. 存在会话文件：{expected}",
+        f"3. 或写入 token 文件：{_WORKBUDDY_TOKEN_FILE}",
+        "4. 或设置环境变量 WORKBUDDY_API_TOKEN",
+    ]
+    if detect_qclaw(require_alive=False):
+        lines.append("若要用本地 QClaw，请在 Key 中输入 openclaw（并先启动 QClaw）。")
+    return "\n".join(lines)
+
+
 def _workbuddy_token() -> str | None:
+    """Extract WorkBuddy token (same layered strategy as PA_Agent).
+
+    1. Desktop auth session (CodeBuddyExtension/.../auth/*.info)
+    2. ~/.workbuddy/.wb_token
+    3. WORKBUDDY_API_TOKEN / CODEBUDDY_AUTH_TOKEN / ACC_AUTH_TOKEN
+    4. DPAPI-decrypted Electron session storage (Windows)
+    """
     for path in _workbuddy_auth_session_candidates():
         token = _read_workbuddy_auth_token(path)
         if token:
+            logger.debug("Using WorkBuddy token from auth session %s", path)
             return token
     if _WORKBUDDY_TOKEN_FILE.exists():
         try:
             token = _WORKBUDDY_TOKEN_FILE.read_text(encoding="utf-8").strip()
             if token:
+                logger.debug("Using WorkBuddy token from %s", _WORKBUDDY_TOKEN_FILE)
                 return token
         except OSError:
             pass
     for env_name in ("WORKBUDDY_API_TOKEN", "CODEBUDDY_AUTH_TOKEN", "ACC_AUTH_TOKEN"):
         token = os.environ.get(env_name, "").strip()
         if token:
+            logger.debug("Using WorkBuddy token from env %s", env_name)
             return token
+    token = _decrypt_electron_token()
+    if token:
+        logger.debug("Using WorkBuddy token from DPAPI Electron storage")
+        return token
+    return None
+
+
+def _read_workbuddy_local_state() -> dict | None:
+    if not _WORKBUDDY_LOCAL_STATE.exists():
+        return None
+    try:
+        return json.loads(_WORKBUDDY_LOCAL_STATE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.debug("Failed to read WorkBuddy Local State: %s", exc)
+        return None
+
+
+def _dpapi_decrypt(blob: bytes) -> bytes | None:
+    import ctypes
+    from ctypes import wintypes
+
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+
+    class DATA_BLOB(ctypes.Structure):
+        _fields_ = [
+            ("cbData", wintypes.DWORD),
+            ("pbData", ctypes.POINTER(ctypes.c_ubyte)),
+        ]
+
+    buf_in = (ctypes.c_ubyte * len(blob))(*blob)
+    blob_in = DATA_BLOB(len(blob), buf_in)
+    blob_out = DATA_BLOB()
+    ok = crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in),
+        None,
+        None,
+        None,
+        None,
+        0x1,
+        ctypes.byref(blob_out),
+    )
+    if not ok:
+        return None
+    try:
+        size = blob_out.cbData
+        buf = ctypes.cast(blob_out.pbData, ctypes.POINTER(ctypes.c_ubyte * size))
+        return bytes(buf.contents)
+    finally:
+        kernel32.LocalFree(blob_out.pbData)
+
+
+def _decrypt_electron_token() -> str | None:
+    """Try extracting auth token from Electron DPAPI-encrypted storage (Windows)."""
+    import sys
+
+    if sys.platform != "win32":
+        return None
+
+    local_state = _read_workbuddy_local_state()
+    if local_state is None:
+        return None
+    encrypted_key_b64 = (local_state.get("os_crypt") or {}).get("encrypted_key") or ""
+    if not encrypted_key_b64:
+        return None
+    try:
+        import base64
+
+        encrypted_key = base64.b64decode(encrypted_key_b64)
+    except Exception:
+        return None
+    if not encrypted_key.startswith(b"DPAPI"):
+        return None
+    aes_key = _dpapi_decrypt(encrypted_key[5:])
+    if aes_key is None:
+        return None
+    try:
+        from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+
+        aesgcm = AESGCM(aes_key)
+    except ImportError:
+        logger.debug("cryptography not installed; skipping WorkBuddy DPAPI decryption")
+        return None
+
+    search_dirs = [
+        _WORKBUDDY_SESSION_PATH / "Local Storage" / "leveldb",
+        _WORKBUDDY_SESSION_PATH / "Session Storage",
+        _WORKBUDDY_SESSION_PATH / "Network",
+        _WORKBUDDY_SESSION_PATH / "Partitions",
+    ]
+    for search_dir in search_dirs:
+        if not search_dir.exists():
+            continue
+        files = [search_dir] if search_dir.is_file() else list(search_dir.rglob("*"))
+        for entry in files:
+            if not entry.is_file():
+                continue
+            try:
+                if entry.stat().st_size > 20_000_000:
+                    continue
+                data = entry.read_bytes()
+            except OSError:
+                continue
+            for prefix in (b"v10", b"v11"):
+                idx = 0
+                while True:
+                    idx = data.find(prefix, idx)
+                    if idx == -1:
+                        break
+                    encrypted_val = data[idx + 3 : idx + 3 + 2048]
+                    if len(encrypted_val) >= 27:
+                        try:
+                            plain = aesgcm.decrypt(
+                                encrypted_val[:12], encrypted_val[12:], None
+                            )
+                            plain_str = plain.decode("utf-8", errors="replace")
+                            looks_like_token = (
+                                plain_str.startswith("eyJ")
+                                or (
+                                    len(plain_str) >= 40
+                                    and plain_str.strip().isascii()
+                                    and not plain_str.startswith("{")
+                                    and not plain_str.startswith("[")
+                                    and "\x00" not in plain_str
+                                )
+                                or (
+                                    "accessToken" in plain_str
+                                    or "access_token" in plain_str
+                                    or "bearerToken" in plain_str
+                                )
+                            )
+                            if looks_like_token:
+                                if "accessToken" in plain_str or "access_token" in plain_str:
+                                    try:
+                                        obj = json.loads(plain_str)
+                                        for k in (
+                                            "accessToken",
+                                            "access_token",
+                                            "token",
+                                            "bearerToken",
+                                        ):
+                                            if k in obj:
+                                                return str(obj[k])
+                                    except json.JSONDecodeError:
+                                        pass
+                                return plain_str.strip("\x00").strip()
+                        except Exception:
+                            pass
+                    idx += 1
     return None
 
 
