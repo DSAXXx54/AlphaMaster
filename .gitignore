@@ -101,3 +101,16 @@ data/cache/
 _tmp_*.py
 backtest_current_forex.py
 _quick_bt.py
+
+# ── 本机配置 / 密钥 / 临时下载（绝不上传）──────────────────────────
+tmp_downloads/
+tmp/
+*.zip
+web_settings*.json
+!web_settings.example.json
+.ai_*/
+secrets/
+*.pem
+*.key
+credentials*.json
+local_settings*.json
