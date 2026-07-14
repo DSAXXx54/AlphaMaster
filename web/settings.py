@@ -6,6 +6,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 SETTINGS_PATH = PROJECT_ROOT / "web_settings.json"
+STRATEGIES_DIR = PROJECT_ROOT / "strategies"
 
 _DEFAULT = {
     "last_data_file": "",
@@ -33,6 +34,70 @@ def _as_pct(value, default: float) -> float:
     if v < 0:
         return default
     return v
+
+
+def _is_ephemeral_data_path(path: str) -> bool:
+    """Stale pytest temp parquet paths (not valid training data)."""
+    norm = str(path or "").replace("\\", "/").lower()
+    if "pytest-of-" not in norm:
+        return False
+    return (
+        "/appdata/local/temp/" in norm
+        or norm.startswith("/tmp/")
+        or "/temp/" in norm
+    )
+
+
+def _is_production_settings_path() -> bool:
+    try:
+        return SETTINGS_PATH.resolve() == (PROJECT_ROOT / "web_settings.json").resolve()
+    except OSError:
+        return False
+
+
+def _is_usable_data_file(path: str) -> bool:
+    p = Path(str(path or "").strip())
+    return p.is_file() and p.suffix.lower() == ".parquet"
+
+
+def _should_replace_last_data_file(path: str) -> bool:
+    cur = str(path or "").strip()
+    if not cur:
+        return True
+    if not Path(cur).is_file():
+        return True
+    return _is_ephemeral_data_path(cur)
+
+
+def _data_file_from_strategy_json(path: str) -> str | None:
+    p = Path(str(path or "").strip())
+    if not p.is_file():
+        return None
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    candidate = str(data.get("data_file") or "").strip()
+    if _is_usable_data_file(candidate):
+        return str(Path(candidate).resolve())
+    return None
+
+
+def _recover_last_data_file(current: dict) -> str:
+    cur = str(current.get("last_data_file") or "").strip()
+    if cur and not _should_replace_last_data_file(cur):
+        return str(Path(cur).resolve())
+
+    for strategy_path in (
+        str(current.get("last_strategy_file") or "").strip(),
+        *(str(p) for p in sorted(STRATEGIES_DIR.glob("best_*.json")) if p.is_file()),
+    ):
+        if not strategy_path:
+            continue
+        candidate = _data_file_from_strategy_json(strategy_path)
+        if candidate:
+            return candidate
+    return cur
 
 
 def load_settings() -> dict:
@@ -75,13 +140,31 @@ def load_settings() -> dict:
     out["feishu_enabled"] = bool(out.get("feishu_enabled", False))
     out["feishu_webhook_url"] = str(out.get("feishu_webhook_url") or "").strip()
     out["feishu_secret"] = str(out.get("feishu_secret") or "").strip()
+    recovered = _recover_last_data_file(out)
+    if recovered != out.get("last_data_file") and _is_production_settings_path():
+        out["last_data_file"] = recovered
+        if recovered:
+            SETTINGS_PATH.write_text(
+                json.dumps(out, indent=2, ensure_ascii=False),
+                encoding="utf-8",
+            )
+    elif recovered != out.get("last_data_file"):
+        out["last_data_file"] = recovered
     return out
 
 
 def save_settings(data: dict) -> dict:
     current = load_settings()
     if "last_data_file" in data:
-        current["last_data_file"] = str(data["last_data_file"] or "").strip()
+        path = str(data["last_data_file"] or "").strip()
+        if (
+            path
+            and _is_ephemeral_data_path(path)
+            and _is_production_settings_path()
+        ):
+            data = {k: v for k, v in data.items() if k != "last_data_file"}
+        else:
+            current["last_data_file"] = path
     if "last_strategy_file" in data:
         current["last_strategy_file"] = str(data["last_strategy_file"] or "").strip()
     if "debug_mode" in data:

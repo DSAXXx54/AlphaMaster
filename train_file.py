@@ -144,6 +144,21 @@ def _save_strategy(engine: AlphaEngine, symbol: str, timeframe: str, data_file: 
                     f"  [策略] 保留磁盘更优结果 {float(old_score):.4f} "
                     f"> 本次 {float(engine.best_score):.4f}，未覆盖 {path}"
                 )
+                merged = dict(old)
+                for key, val in (
+                    ("timeframe", timeframe),
+                    ("data_file", str(Path(data_file).resolve())),
+                    ("mode", "parquet_file"),
+                    ("train_steps", ModelConfig.TRAIN_STEPS),
+                ):
+                    if val is not None and not merged.get(key):
+                        merged[key] = val
+                if merged != old:
+                    path.write_text(
+                        json.dumps(merged, indent=2, ensure_ascii=False),
+                        encoding="utf-8",
+                    )
+                    print(f"  [策略] 已补全数据路径等元数据: {path}")
                 return
         except (json.JSONDecodeError, OSError, TypeError, ValueError):
             pass

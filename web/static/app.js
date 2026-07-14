@@ -662,6 +662,7 @@ async function refreshOverview() {
   }
 
   await refreshDebugLogs();
+  refreshAiProviderStatus();
 }
 
 async function loadConfig() {
@@ -710,6 +711,16 @@ function updateBtCostHint() {
   hint.textContent = `单边成本 ${fee}%`;
 }
 
+async function refreshAiProviderStatus() {
+  try {
+    const status = await fetchJSON("/api/ai/providers", { silent: true });
+    window.__aiProviderStatus = status;
+  } catch (_) {
+    /* keep previous snapshot */
+  }
+  updateAiChannelHint();
+}
+
 async function initAiPanel(cfg) {
   const keyInput = $("aiApiKeyInput");
   if (!keyInput) return;
@@ -719,13 +730,14 @@ async function initAiPanel(cfg) {
     keyInput.value = cfg.ai_provider;
   }
 
-  try {
-    const status = await fetchJSON("/api/ai/providers");
-    window.__aiProviderStatus = status;
-  } catch (_) {
-    window.__aiProviderStatus = null;
+  await refreshAiProviderStatus();
+  if (!keyInput.dataset.aiStatusBound) {
+    keyInput.dataset.aiStatusBound = "1";
+    keyInput.addEventListener("input", () => {
+      updateAiChannelHint();
+      refreshAiProviderStatus();
+    });
   }
-  updateAiChannelHint();
 }
 
 function resolveAiFromKey(raw) {
@@ -754,7 +766,9 @@ function updateAiChannelHint() {
     if (headHint) headHint.textContent = "DeepSeek · deepseek-v4-flash";
     hint.textContent = "当前：DeepSeek（deepseek-v4-flash · https://api.deepseek.com）。";
   } else if (resolved.provider === "openclaw") {
-    if (headHint) headHint.textContent = row?.available ? "openclaw (QClaw) · 已匹配" : "openclaw (QClaw) · 未就绪";
+    if (headHint) {
+      headHint.textContent = row?.available ? "openclaw (QClaw) · 已匹配" : "openclaw (QClaw) · 未就绪";
+    }
     hint.textContent = row?.hint || "已匹配 openclaw：将自动使用本地 QClaw token。";
   } else {
     if (headHint) headHint.textContent = row?.available ? "openclaw_wb · 已匹配" : "openclaw_wb · 未就绪";
@@ -784,6 +798,8 @@ async function runAiAnalyze() {
     view.textContent = "请填写 DeepSeek API Key，或在 Key 中输入 openclaw / openclaw_wb";
     return;
   }
+
+  await refreshAiProviderStatus();
 
   if (btn) btn.disabled = true;
   view.className = "ai-answer loading";
@@ -1795,6 +1811,19 @@ let rtImportedStrategy = null; // {path, name}
 let rtGridSig = "";
 let rtServerSkew = 0; // server_time - local_now（秒）
 let rtCountdownTimer = null;
+let rtTvBlockedShownAt = 0;
+let rtTvWikiUrl = "https://my.feishu.cn/wiki/FuqnwkPwdiCLhQkPloKc7r1lntg";
+const RT_TV_BLOCKED_MSG =
+  "当前设备无法连接 TradingView 数据服务，将无法获取以下 K 线数据：\n" +
+  "  · A 股（上证 SSE、深证 SZSE）\n" +
+  "  · 港股（HKEX）\n" +
+  "  · 美股及指数（NYSE、NASDAQ、SP）\n" +
+  "  · 外汇、贵金属、商品期货\n\n" +
+  "解决方案：\n" +
+  "  · 把你的VPN工具设成全局，并开启TUN(虚拟网卡)模式，如果还不行：\n" +
+  "  · 使用云服务器部署本程序（推荐）—— 云服务器可正常连接 TradingView\n" +
+  "  · 或切换回 MT5 数据源，仅使用 MT5 提供的品种数据";
+const RT_TV_BLOCKED_CODE = "TV_CONNECTIVITY_BLOCKED";
 
 const RT_DIR = {
   LONG: { label: "↑ 预期上涨", cls: "rt-long", color: "#4ade80" },
@@ -2124,6 +2153,10 @@ async function rtAddWatch() {
   const btn = $("rtAddBtn");
   if (btn) btn.disabled = true;
   try {
+    if (source === "tradingview") {
+      const reachable = await rtEnsureTradingViewReachable();
+      if (!reachable) return;
+    }
     await fetchJSON("/api/realtime/watch", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -2138,6 +2171,97 @@ async function rtAddWatch() {
   } finally {
     if (btn) btn.disabled = false;
   }
+}
+
+async function rtEnsureTradingViewReachable() {
+  const picked = $("rtStrategyPicked");
+  if (picked) {
+    picked.textContent = "正在检测 TradingView 连通性…";
+    picked.classList.remove("bad");
+  }
+  try {
+    const res = await fetchJSON("/api/realtime/tradingview/probe", {
+      method: "POST",
+      silent: true,
+    });
+    if (res && res.ok) {
+      if (picked) picked.textContent = "";
+      return true;
+    }
+    if (res?.wiki_url) rtTvWikiUrl = res.wiki_url;
+    await showTvBlockedDialog(res?.message || RT_TV_BLOCKED_MSG);
+    if (picked) {
+      picked.textContent = "TradingView 不可用，请开 VPN 或换云服务器";
+      picked.classList.add("bad");
+    }
+    return false;
+  } catch (e) {
+    await showTvBlockedDialog(RT_TV_BLOCKED_MSG);
+    if (picked) {
+      picked.textContent = "TradingView 检测失败: " + (e.message || e);
+      picked.classList.add("bad");
+    }
+    return false;
+  }
+}
+
+function showTvBlockedDialog(message) {
+  const now = Date.now();
+  // 避免轮询反复弹出
+  if (now - rtTvBlockedShownAt < 60_000) {
+    return Promise.resolve("dedupe");
+  }
+  rtTvBlockedShownAt = now;
+  const modal = $("tvBlockedModal");
+  const body = $("tvBlockedBody");
+  if (!modal || !body) {
+    window.alert(message || RT_TV_BLOCKED_MSG);
+    return Promise.resolve("alert");
+  }
+  body.textContent = message || RT_TV_BLOCKED_MSG;
+  modal.hidden = false;
+  return new Promise((resolve) => {
+    modal._tvResolve = resolve;
+  });
+}
+
+function closeTvBlockedDialog(choice) {
+  const modal = $("tvBlockedModal");
+  if (modal) modal.hidden = true;
+  const resolve = modal && modal._tvResolve;
+  if (resolve) {
+    modal._tvResolve = null;
+    resolve(choice || "cancel");
+  }
+}
+
+async function onTvBlockedSwitchMt5() {
+  const sel = $("rtSourceSelect");
+  if (sel) {
+    const hasMt5 = [...sel.options].some((o) => o.value === "mt5");
+    if (hasMt5) {
+      sel.value = "mt5";
+      onRtSourceChange();
+    }
+  }
+  closeTvBlockedDialog("mt5");
+}
+
+function onTvBlockedOpenCloud() {
+  try {
+    window.open(rtTvWikiUrl, "_blank", "noopener,noreferrer");
+  } catch (_) {}
+  closeTvBlockedDialog("cloud");
+}
+
+function maybeShowTvBlockedFromWatches(watches) {
+  const hit = (watches || []).find(
+    (w) =>
+      w.source === "tradingview" &&
+      (w.tv_blocked || w.message === RT_TV_BLOCKED_CODE)
+  );
+  if (!hit) return;
+  showTvBlockedDialog(RT_TV_BLOCKED_MSG);
 }
 
 async function rtRemoveWatch(id) {
@@ -2200,6 +2324,7 @@ async function refreshRealtime() {
     }
   }
   renderRealtimeGrid(st.watches || []);
+  maybeShowTvBlockedFromWatches(st.watches || []);
   ensureRtCountdownTimer();
   tickRtCountdowns();
 }
@@ -2275,9 +2400,13 @@ function renderRealtimeGrid(watches) {
       const srcLabel = (rtSourceById[w.source] || {}).label || w.source;
       const factorText = w.factor_value != null ? Number(w.factor_value).toFixed(4) : "—";
       const warn = w.warn ? `<div class="rt-warn" title="${escHtml(w.warn)}">⚠ ${escHtml(w.warn)}</div>` : "";
+      const displayMsg =
+        w.message === RT_TV_BLOCKED_CODE || w.tv_blocked
+          ? "无法连接 TradingView：请开启全局 VPN（TUN）或使用云服务器"
+          : w.message;
       const msg =
-        w.state !== "ok" && w.message
-          ? `<div class="rt-msg">${escHtml(w.message)}</div>`
+        w.state !== "ok" && displayMsg
+          ? `<div class="rt-msg">${escHtml(displayMsg)}</div>`
           : "";
       const sizeText = plain ? plain.size : "—";
       return `
@@ -2387,6 +2516,11 @@ async function init() {
   if ($("rtStrategySelect")) $("rtStrategySelect").addEventListener("change", onRtStrategyChange);
   if ($("rtBrowseStrategyBtn")) $("rtBrowseStrategyBtn").addEventListener("click", rtBrowseStrategy);
   if ($("rtAddBtn")) $("rtAddBtn").addEventListener("click", rtAddWatch);
+  if ($("tvBlockedMt5Btn")) $("tvBlockedMt5Btn").addEventListener("click", onTvBlockedSwitchMt5);
+  if ($("tvBlockedCloudBtn")) $("tvBlockedCloudBtn").addEventListener("click", onTvBlockedOpenCloud);
+  document.querySelectorAll("[data-close-tv-blocked]").forEach((el) => {
+    el.addEventListener("click", () => closeTvBlockedDialog("cancel"));
+  });
   if ($("rtFeishuSaveBtn")) $("rtFeishuSaveBtn").addEventListener("click", saveRtFeishuSettings);
   if ($("rtFeishuTestBtn")) $("rtFeishuTestBtn").addEventListener("click", testRtFeishu);
   if ($("rtFeishuHelpBtn")) $("rtFeishuHelpBtn").addEventListener("click", openRtFeishuHelpModal);

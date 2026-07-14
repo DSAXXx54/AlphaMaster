@@ -540,6 +540,18 @@
       </div>
     </div>
 
+    <div class="modal" id="tvBlockedModal" hidden>
+      <div class="modal-backdrop" data-close-tv-blocked></div>
+      <div class="modal-card" role="dialog" aria-labelledby="tvBlockedTitle">
+        <h3 id="tvBlockedTitle">无法使用 TradingView</h3>
+        <pre class="modal-body modal-tv-blocked-body" id="tvBlockedBody"></pre>
+        <div class="modal-actions">
+          <button type="button" class="btn btn-secondary" id="tvBlockedMt5Btn">切换回 MT5</button>
+          <button type="button" class="btn btn-primary" id="tvBlockedCloudBtn">使用云服务器</button>
+        </div>
+      </div>
+    </div>
+
     <div class="modal" id="errorModal" hidden>
       <div class="modal-backdrop" data-close-error></div>
       <div class="modal-card modal-card-error" role="dialog" aria-labelledby="errorModalTitle">
@@ -554,6 +566,6 @@
   </div>
 
   <script src="/static/bg.js?v=1"></script>
-  <script src="/static/app.js?v=58"></script>
+  <script src="/static/app.js?v=59"></script>
 </body>
 </html>

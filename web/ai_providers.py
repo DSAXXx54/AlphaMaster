@@ -85,7 +85,7 @@ def detect_qclaw(*, require_alive: bool = False) -> bool:
         return True
     host, port, token = info
     base = f"http://{host}:{port}/v1"
-    return _pick_openclaw_model(base, token, probe_only=True)
+    return _probe_qclaw_gateway(base, token)
 
 
 def detect_workbuddy() -> bool:
@@ -98,15 +98,42 @@ def detect_workbuddy() -> bool:
     return _WORKBUDDY_CONFIG_DIR.exists()
 
 
+def _probe_qclaw_gateway(base_url: str, token: str, *, timeout: float = 5.0) -> bool:
+    """Return True when the local QClaw gateway responds."""
+    import urllib.error
+    import urllib.request
+
+    headers = {"Authorization": f"Bearer {token}", "User-Agent": "AlphaMaster"}
+    for path in ("/models", "/health"):
+        try:
+            req = urllib.request.Request(
+                f"{base_url.rstrip('/')}{path}",
+                headers=headers,
+                method="GET",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True
+        except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                return True
+        except Exception as exc:
+            logger.debug("QClaw probe %s failed: %s", path, exc)
+    return False
+
+
 def provider_status() -> dict[str, Any]:
     qclaw_cfg = detect_qclaw(require_alive=False)
-    qclaw_ok = detect_qclaw(require_alive=True) if qclaw_cfg else False
+    qclaw_reachable = detect_qclaw(require_alive=True) if qclaw_cfg else False
     wb_ok = bool(_workbuddy_token())
     wb_env = detect_workbuddy()
-    if qclaw_ok:
+    if qclaw_cfg and qclaw_reachable:
         qclaw_hint = "已检测到本地 QClaw Gateway（可连通）"
     elif qclaw_cfg:
-        qclaw_hint = "已找到 QClaw 配置，但 Gateway 未启动（请先打开 QClaw）"
+        qclaw_hint = (
+            "已读取 QClaw 配置，将自动连接本地 Gateway。"
+            "若 QClaw 已打开仍显示未连通，可直接尝试分析（分析时会重新检测）。"
+        )
     else:
         qclaw_hint = "未检测到 QClaw（需 ~/.qclaw/openclaw.json 且 chatCompletions 已启用）"
     if wb_ok:
@@ -131,7 +158,8 @@ def provider_status() -> dict[str, Any]:
             {
                 "id": "openclaw",
                 "label": "openclaw (QClaw)",
-                "available": qclaw_ok,
+                "available": qclaw_cfg,
+                "gateway_reachable": qclaw_reachable,
                 "needs_user_key": False,
                 "hint": qclaw_hint,
             },
@@ -193,9 +221,10 @@ def resolve_provider(provider: str, api_key: str | None = None) -> ResolvedProvi
             )
         host, port, token = info
         base = f"http://{host}:{port}/v1"
-        if not _pick_openclaw_model(base, token, probe_only=True):
+        if not _probe_qclaw_gateway(base, token):
             raise ValueError(
-                f"已读取 QClaw token，但 Gateway 未连通（{base}）。请先启动 QClaw 后再试。"
+                f"已读取 QClaw 配置，但暂时无法连接 Gateway（{base}）。"
+                "请确认 QClaw 已打开；若刚启动请稍等几秒后重试。"
             )
         model = str(_pick_openclaw_model(base, token) or _OPENCLAW_MODEL)
         return ResolvedProvider(
@@ -352,6 +381,8 @@ def _pick_openclaw_model(
     When *probe_only* is True, return whether the gateway responded.
     Otherwise return a preferred model id (falls back to ``openclaw``).
     """
+    if probe_only:
+        return _probe_qclaw_gateway(base_url, token)
     try:
         import urllib.request
 
@@ -360,10 +391,8 @@ def _pick_openclaw_model(
             headers={"Authorization": f"Bearer {token}", "User-Agent": "AlphaMaster"},
             method="GET",
         )
-        with urllib.request.urlopen(req, timeout=2.0) as resp:
+        with urllib.request.urlopen(req, timeout=5.0) as resp:
             data = json.loads(resp.read().decode("utf-8"))
-        if probe_only:
-            return True
         ids = [str(m.get("id", "")) for m in data.get("data", []) if m.get("id")]
         if _OPENCLAW_MODEL in ids:
             return _OPENCLAW_MODEL
@@ -372,9 +401,7 @@ def _pick_openclaw_model(
                 return mid
     except Exception as exc:
         logger.debug("QClaw /models probe failed: %s", exc)
-        if probe_only:
-            return False
-    return False if probe_only else _OPENCLAW_MODEL
+    return _OPENCLAW_MODEL
 
 
 def _workbuddy_auth_dirs() -> list[Path]:

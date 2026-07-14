@@ -46,6 +46,32 @@ def _strategy_file_for_symbol(symbol: str | None) -> str:
     return _STRATEGY_FILE
 
 
+def _fallback_data_file_for_symbol(symbol: str) -> tuple[str | None, str | None]:
+    """Read web_settings.json last_data_file when strategy JSON lacks data_file."""
+    settings_path = pathlib.Path("web_settings.json")
+    if not settings_path.exists():
+        return None, None
+    try:
+        settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        last = str(settings.get("last_data_file") or "").strip()
+    except (json.JSONDecodeError, OSError):
+        return None, None
+    if not last:
+        return None, None
+    p = pathlib.Path(last)
+    if not p.exists():
+        return None, None
+    try:
+        from data_pipeline.parquet_manager import inspect_parquet_file
+
+        info = inspect_parquet_file(str(p.resolve()))
+    except Exception:
+        return str(p.resolve()), None
+    if info.get("symbol") != symbol:
+        return None, None
+    return str(p.resolve()), info.get("timeframe")
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Walk-Forward 折叠构建
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1007,6 +1033,14 @@ class AlphaEngine:
                     val = existing.get(key)
                 if val is not None:
                     strategy_data[key] = val
+            if not strategy_data.get("data_file") and self.target_symbol:
+                data_file, tf = _fallback_data_file_for_symbol(self.target_symbol)
+                if data_file:
+                    strategy_data["data_file"] = data_file
+                if tf and not strategy_data.get("timeframe"):
+                    strategy_data["timeframe"] = tf
+                if data_file and not strategy_data.get("mode"):
+                    strategy_data["mode"] = "parquet_file"
 
             with open(save_path, "w", encoding="utf-8") as fp:
                 json.dump(strategy_data, fp, indent=2, ensure_ascii=False)

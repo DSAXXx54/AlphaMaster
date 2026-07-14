@@ -160,6 +160,7 @@ class WatchTask:
             ),
             "updated_at": self.updated_at,
             "message": self.message,
+            "tv_blocked": self.message == "TV_CONNECTIVITY_BLOCKED",
             "warn": self.warn,
             "threshold": min_exposure(),
             "history": list(self.history),
@@ -187,6 +188,7 @@ class RealtimeManager:
         # K线缓存：(kind,symbol,tf) -> (monotonic_ts, bars)
         self._bar_cache: dict[tuple[str, str, str], tuple[float, list]] = {}
         self._loaded = False
+        self._tv_blocked_until = 0.0
 
     # ── 持久化 ──────────────────────────────────────────────────────────
     def load_persisted(self) -> None:
@@ -389,7 +391,29 @@ class RealtimeManager:
                     except Exception:
                         pass
         except Exception as exc:  # noqa: BLE001
-            self._set_error(task, str(exc))
+            msg = str(exc)
+            if task.source == "tradingview":
+                try:
+                    from web.data_sources.tradingview_connectivity import (
+                        TV_CONNECTIVITY_BLOCKED,
+                        check_tradingview_connectivity,
+                    )
+
+                    now_m = time.monotonic()
+                    if now_m < self._tv_blocked_until:
+                        msg = TV_CONNECTIVITY_BLOCKED
+                    else:
+                        ok, _detail = check_tradingview_connectivity(
+                            timeout_s=12.0, max_attempts=1, retry_delay_s=0.0
+                        )
+                        if not ok:
+                            self._tv_blocked_until = now_m + 120.0
+                            msg = TV_CONNECTIVITY_BLOCKED
+                        else:
+                            self._tv_blocked_until = 0.0
+                except Exception:
+                    pass
+            self._set_error(task, msg)
         finally:
             with self._inflight_lock:
                 self._inflight.discard(task.id)

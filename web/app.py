@@ -208,7 +208,10 @@ def _strategy_context() -> dict[str, Any]:
     strategy_info = None
     if resolved:
         try:
-            strategy_info = inspect_strategy_file(resolved)
+            strategy_info = inspect_strategy_file(
+                resolved,
+                data_file_hint=settings.get("last_data_file") or None,
+            )
         except Exception as e:
             strategy_info = {
                 "strategy_file": resolved,
@@ -276,9 +279,20 @@ def _wait_training_idle(timeout_s: float = 5.0) -> None:
         time.sleep(0.2)
 
 
-def _sync_and_persist_best_strategy(symbol: str) -> dict[str, Any] | None:
+def _sync_and_persist_best_strategy(
+    symbol: str,
+    *,
+    data_file_hint: str | None = None,
+) -> dict[str, Any] | None:
     invalidate_checkpoint_cache()
-    info = sync_best_strategy_for_symbol(symbol)
+    hint = data_file_hint
+    if not hint:
+        job = training_manager.status().get("job") or {}
+        if str(job.get("symbol") or "") == symbol:
+            hint = job.get("data_file") or None
+    if not hint:
+        hint = load_settings().get("last_data_file") or None
+    info = sync_best_strategy_for_symbol(symbol, data_file_hint=hint)
     if info:
         save_settings({"last_strategy_file": info["strategy_file"]})
     return info
@@ -693,11 +707,15 @@ def api_training_start(req: StartTrainingRequest) -> dict[str, Any]:
 def api_training_stop() -> dict[str, Any]:
     job = training_manager.status().get("job") or {}
     symbol = job.get("symbol")
+    data_file_hint = job.get("data_file")
     stopped = training_manager.stop()
     strategy_file = None
     if symbol:
         _wait_training_idle()
-        strategy_file = _sync_and_persist_best_strategy(symbol)
+        strategy_file = _sync_and_persist_best_strategy(
+            symbol,
+            data_file_hint=data_file_hint,
+        )
     return {
         "ok": stopped,
         "training": training_manager.status(),
@@ -951,6 +969,28 @@ def _startup_realtime() -> None:
 @app.get("/api/realtime/sources")
 def api_realtime_sources() -> dict[str, Any]:
     return {"sources": list_sources(), "min_exposure": min_exposure()}
+
+
+@app.post("/api/realtime/tradingview/probe")
+def api_realtime_tradingview_probe() -> dict[str, Any]:
+    """Probe TradingView reachability (same behavior as PA_Agent before fetch)."""
+    from web.data_sources.tradingview_connectivity import (
+        TV_CLOUD_SERVER_WIKI_URL,
+        TV_CONNECTIVITY_MESSAGE,
+        check_tradingview_connectivity,
+    )
+
+    ok, detail = check_tradingview_connectivity(
+        timeout_s=15.0, max_attempts=2, retry_delay_s=2.0
+    )
+    return {
+        "ok": ok,
+        "detail": detail,
+        "blocked": not ok,
+        "title": "无法使用 TradingView",
+        "message": None if ok else TV_CONNECTIVITY_MESSAGE,
+        "wiki_url": TV_CLOUD_SERVER_WIKI_URL,
+    }
 
 
 @app.get("/api/realtime/strategies")

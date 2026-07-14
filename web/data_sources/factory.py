@@ -5,11 +5,10 @@ import threading
 
 from web.data_sources.base import DataSource
 
+# 前端下拉可见的数据源（okx / tongdaxin 实现保留，暂不展示）
 SOURCE_KINDS: tuple[tuple[str, str], ...] = (
     ("mt5", "MT5"),
     ("tradingview", "TradingView"),
-    ("eastmoney", "东方财富"),
-    ("tongdaxin", "通达信"),
 )
 
 _INSTANCES: dict[str, DataSource] = {}
@@ -23,9 +22,9 @@ def _build(kind: str) -> DataSource:
     if kind == "tradingview":
         from web.data_sources.tradingview_source import TradingViewSource
         return TradingViewSource()
-    if kind == "eastmoney":
-        from web.data_sources.eastmoney_source import EastMoneySource
-        return EastMoneySource()
+    if kind == "okx":
+        from web.data_sources.okx_source import OKXSource
+        return OKXSource()
     if kind == "tongdaxin":
         from web.data_sources.tongdaxin_source import TongdaxinSource
         return TongdaxinSource()
