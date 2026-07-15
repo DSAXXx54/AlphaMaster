@@ -94,8 +94,9 @@ AlphaMaster/
 - 复制 `.env.example` 为 `.env` 填写 MT5 等凭证（`.env` 已 gitignore）  
 
 ```bash
-pip install -r requirements.txt
-# 可选可视化等：pip install -r requirements-optional.txt
+python -m pip install -r requirements.txt
+# TradingView 若上面 git 行失败，可单独装：
+# python -m pip install git+https://github.com/rongardF/tvdatafeed.git
 ```
 
 ---

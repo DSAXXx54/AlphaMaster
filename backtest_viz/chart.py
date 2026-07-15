@@ -1,7 +1,7 @@
 """
 backtest_viz/chart.py — K 线图 + 出入场标注 + PnL 子图
 
-依赖 matplotlib（项目 requirements-optional.txt 里有）。
+依赖 matplotlib（见 requirements.txt）。
 在 matplotlib 无法显示 GUI 时自动切换到 Agg 后端，直接保存为 PNG/HTML。
 """
 from __future__ import annotations
