@@ -7,14 +7,22 @@ from datetime import datetime, timezone, timedelta
 
 from web.data_sources.base import Bar, DataSource, DataSourceUnavailable
 
-# 通达信行情服务器（多个备选）
+# 通达信行情服务器（多个备选，按延迟排序）
 _SERVERS = [
     ("115.238.90.165", 7709),
     ("180.153.18.170", 7709),
     ("119.147.212.81", 7709),
     ("14.17.75.71", 7709),
     ("59.173.18.77", 7709),
+    ("114.67.62.91", 7709),
+    ("115.238.56.198", 7709),
+    ("115.238.90.166", 7709),
+    ("60.12.136.218", 7709),
+    ("60.191.116.36", 7709),
 ]
+
+# 连接最大存活时间（秒），超过后强制重连，避免 pytdx 静默失效
+_CONN_MAX_AGE = 30
 
 # 项目周期 -> pytdx category
 _CAT = {
@@ -117,6 +125,7 @@ class TongdaxinSource(DataSource):
     def __init__(self) -> None:
         self._api = None
         self._lock = threading.Lock()
+        self._conn_time = 0.0  # 连接建立时间，用于检测过期连接
 
     def available(self) -> tuple[bool, str]:
         try:
@@ -132,8 +141,13 @@ class TongdaxinSource(DataSource):
         return list(_PRESETS)
 
     def connect(self) -> None:
+        # 检查现有连接是否过期
         if self._api is not None:
-            return
+            if time.time() - self._conn_time > _CONN_MAX_AGE:
+                # 连接过期，断开重连
+                self.disconnect()
+            else:
+                return
         try:
             from pytdx.hq import TdxHq_API
         except ImportError as exc:
@@ -143,6 +157,7 @@ class TongdaxinSource(DataSource):
             try:
                 if api.connect(host, port):
                     self._api = api
+                    self._conn_time = time.time()
                     return
             except Exception:
                 continue
@@ -155,6 +170,7 @@ class TongdaxinSource(DataSource):
             except Exception:
                 pass
         self._api = None
+        self._conn_time = 0.0
 
     def _fetch_raw(self, cat: int, market: int, code: str, want: int, is_index: bool, start: int = 0):
         """指数走 get_index_bars，股票走 get_security_bars。
@@ -165,6 +181,32 @@ class TongdaxinSource(DataSource):
         if is_index:
             return self._api.get_index_bars(cat, market, code, start, want)
         return self._api.get_security_bars(cat, market, code, start, want)
+
+    def _fetch_with_retry(
+        self, cat: int, market: int, code: str, want: int, is_index: bool, start: int = 0,
+        max_retries: int = 2,
+    ) -> list[dict]:
+        """带重连重试的拉取。pytdx 连接失效后不抛异常而是返回空数据，
+        所以遇到空数据时强制断开重连再试。"""
+        for attempt in range(max_retries + 1):
+            try:
+                raw = self._fetch_raw(cat, market, code, want, is_index, start=start)
+                if raw:
+                    return raw
+                # 空数据：可能是连接失效，强制重连
+                if attempt < max_retries:
+                    self._api = None
+                    self._conn_time = 0.0
+                    self.connect()
+                    continue
+            except Exception:
+                if attempt < max_retries:
+                    self._api = None
+                    self._conn_time = 0.0
+                    self.connect()
+                    continue
+                raise
+        return []
 
     def _fetch_paginated(
         self, cat: int, market: int, code: str, want: int, is_index: bool
@@ -185,13 +227,7 @@ class TongdaxinSource(DataSource):
             self.connect()
             while remaining > 0:
                 page_size = min(remaining, PAGE)
-                try:
-                    raw = self._fetch_raw(cat, market, code, page_size, is_index, start=offset)
-                except Exception:
-                    # 连接可能失效，重连一次
-                    self._api = None
-                    self.connect()
-                    raw = self._fetch_raw(cat, market, code, page_size, is_index, start=offset)
+                raw = self._fetch_with_retry(cat, market, code, page_size, is_index, start=offset)
 
                 if not raw:
                     break  # 服务器无更多数据
@@ -233,6 +269,20 @@ class TongdaxinSource(DataSource):
         is_index = _is_index(market, code)
 
         raw = self._fetch_paginated(cat, market, code, want, is_index)
+
+        # 回退机制：无前缀的 000xxx 代码可能是深市股票(如 000001 平安银行)，
+        # 也可能是沪市指数(如 sh000001 上证指数)。先按默认深市股票查，
+        # 如果空数据或数据异常，自动回退到沪市指数重试。
+        if not raw or _looks_corrupted(raw):
+            if not is_index and code.startswith("000"):
+                # 尝试沪市指数
+                alt_market = 1
+                alt_is_index = True
+                alt_raw = self._fetch_paginated(cat, alt_market, code, want, alt_is_index)
+                if alt_raw and not _looks_corrupted(alt_raw):
+                    raw = alt_raw
+                    market = alt_market
+                    is_index = alt_is_index
 
         if not raw:
             raise DataSourceUnavailable(
