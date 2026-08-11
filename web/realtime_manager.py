@@ -42,7 +42,7 @@ _TF_SECONDS = {
     "1M": 2592000,  # 近似 30 天
 }
 _DEFAULT_CADENCE = 60
-_N_BARS = 3500                # 每次拉取的历史 bar 数（喂给特征引擎，需 ≥ Config.MIN_BARS=3000）
+_N_BARS = 1000                # 每次拉取的历史 bar 数（实盘最低需 800：特征warm-up 200 + VM滚动归一化 500 + 余量）
 _HISTORY_LEN = 60             # 保留的信号强度历史点数（供 sparkline）
 _VALID_KINDS = {k for k, _ in SOURCE_KINDS}
 
@@ -391,20 +391,7 @@ class RealtimeManager:
                 task.history.append(round(result["strength"], 4))
                 # 已有上次方向且发生转折时推飞书（首次算出方向不打扰）
                 if prev_dir and new_dir and prev_dir != new_dir:
-                    try:
-                        from web.feishu_notify import notify_direction_flip
-
-                        notify_direction_flip(
-                            symbol=task.symbol,
-                            timeframe=task.timeframe,
-                            strategy_name=task.strategy_name,
-                            prev_direction=prev_dir,
-                            new_direction=new_dir,
-                            strength=task.strength,
-                            factor_value=task.factor_value,
-                        )
-                    except Exception:
-                        pass
+                    self._notify_direction_flip(task, prev_dir, new_dir)
         except Exception as exc:  # noqa: BLE001
             msg = str(exc)
             if task.source == "tradingview":
@@ -432,6 +419,39 @@ class RealtimeManager:
         finally:
             with self._inflight_lock:
                 self._inflight.discard(task.id)
+
+    def _notify_direction_flip(self, task: WatchTask, prev_dir: str, new_dir: str) -> None:
+        """向飞书推送方向转折通知，带日志和重试。"""
+        try:
+            from web.feishu_notify import notify_direction_flip
+
+            ok, msg = notify_direction_flip(
+                symbol=task.symbol,
+                timeframe=task.timeframe,
+                strategy_name=task.strategy_name,
+                prev_direction=prev_dir,
+                new_direction=new_dir,
+                strength=task.strength,
+                factor_value=task.factor_value,
+            )
+            if ok:
+                print(
+                    f"[飞书通知] ✓ {task.symbol} {task.timeframe} "
+                    f"{prev_dir}→{new_dir} 推送成功",
+                    flush=True,
+                )
+            else:
+                print(
+                    f"[飞书通知] ✗ {task.symbol} {task.timeframe} "
+                    f"{prev_dir}→{new_dir} 推送失败: {msg}",
+                    flush=True,
+                )
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[飞书通知] ✗ {task.symbol} {task.timeframe} "
+                f"{prev_dir}→{new_dir} 异常: {exc}",
+                flush=True,
+            )
 
     def _set_error(self, task: WatchTask, message: str) -> None:
         task.state = "error"
