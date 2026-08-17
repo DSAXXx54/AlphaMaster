@@ -908,32 +908,41 @@ async function browseStrategyFile() {
 async function applyBestStrategyForBacktest(symbol, strategyFile) {
   if (strategyFile) {
     renderStrategyFileCard(strategyFile);
-    return;
+    return true;
   }
-  if (!symbol) return;
+  if (!symbol) return false;
+  // Best-effort：无 best_*.json 时后端返回 404，属正常情况，不弹窗、不重试、不回落到
+  // loadBacktestStrategyContext（否则会与下方形成无限循环并反复 refreshDebugLogs）。
   try {
-    const res = await fetchJSON(
-      `/api/strategy-file/sync-best?symbol=${encodeURIComponent(symbol)}`,
+    const res = await fetch(
+      API + `/api/strategy-file/sync-best?symbol=${encodeURIComponent(symbol)}`,
       { method: "POST" }
     );
-    renderStrategyFileCard(res);
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) return false;
+    renderStrategyFileCard(data);
+    return true;
   } catch (_) {
-    await loadBacktestStrategyContext();
+    return false;
+  }
+}
+
+async function loadConfigStrategyFallback() {
+  try {
+    const cfg = await fetchJSON("/api/config", { silent: true, retries: 1 });
+    if (cfg.strategy_file) renderStrategyFileCard(cfg.strategy_file);
+  } catch (_) {
+    /* ignore */
   }
 }
 
 async function loadBacktestStrategyContext() {
   const sym = selectedStrategySymbol || selectedSymbol;
   if (sym) {
-    await applyBestStrategyForBacktest(sym, null);
-    return;
+    const applied = await applyBestStrategyForBacktest(sym, null);
+    if (applied) return;
   }
-  try {
-    const cfg = await fetchJSON("/api/config");
-    if (cfg.strategy_file) renderStrategyFileCard(cfg.strategy_file);
-  } catch (_) {
-    /* ignore */
-  }
+  await loadConfigStrategyFallback();
 }
 
 async function browseDataFile() {
