@@ -1072,6 +1072,18 @@ td:nth-child(2) { color: var(--accent); font-family: var(--mono); }
 
 .ai-key-field input { width: 100%; }
 
+.ai-url-field {
+  flex: 1 1 280px;
+}
+
+.ai-url-field input { width: 100%; min-width: 260px; }
+
+.ai-model-field {
+  flex: 0 1 220px;
+}
+
+.ai-model-field input { width: 100%; min-width: 180px; }
+
 .ai-answer {
   min-height: 180px;
   max-height: 480px;

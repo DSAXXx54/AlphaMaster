@@ -1,7 +1,9 @@
 """AI provider resolution for training analysis.
 
 Supports:
-  - deepseek: fixed model deepseek-v4-flash @ https://api.deepseek.com (user API key)
+  - deepseek / OpenAI-compatible: user API key + configurable base_url / model
+    (defaults: deepseek-v4-flash @ https://api.deepseek.com；也可填
+    https://token.sensenova.cn/v1 等兼容网关)
   - openclaw: local QClaw gateway Agent (token from ~/.qclaw/openclaw.json)
   - openclaw_wb: WorkBuddy / copilot.tencent.com (local session token)
 
@@ -20,6 +22,9 @@ logger = logging.getLogger(__name__)
 
 DEEPSEEK_MODEL = "deepseek-v4-flash"
 DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+# SenseNova OpenAI-compatible gateway caps (see PA_Agent deepseek_client).
+_SENSENOVA_GLM_MAX_OUTPUT_TOKENS = 131_072
+_SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS = 65_536
 
 _QCLAW_CONFIG_CANDIDATES = (
     Path.home() / ".qclaw" / "openclaw.json",
@@ -150,10 +155,15 @@ def provider_status() -> dict[str, Any]:
         "providers": [
             {
                 "id": "deepseek",
-                "label": "DeepSeek (deepseek-v4-flash)",
+                "label": "OpenAI 兼容（DeepSeek / SenseNova 等）",
                 "available": True,
                 "needs_user_key": True,
-                "hint": "固定模型 deepseek-v4-flash · https://api.deepseek.com",
+                "hint": (
+                    "可自定义 Base URL + 模型。默认 DeepSeek；"
+                    "SenseNova 示例：https://token.sensenova.cn/v1"
+                ),
+                "default_base_url": DEEPSEEK_BASE_URL,
+                "default_model": DEEPSEEK_MODEL,
             },
             {
                 "id": "openclaw",
@@ -187,7 +197,48 @@ def _alias_provider_from_key(api_key: str | None) -> str | None:
     return None
 
 
-def resolve_provider(provider: str, api_key: str | None = None) -> ResolvedProvider:
+def _normalize_base_url(base_url: str | None) -> str:
+    url = (base_url or "").strip()
+    if not url:
+        return DEEPSEEK_BASE_URL
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError(
+            f"Base URL 必须以 http:// 或 https:// 开头（当前: {url}）。"
+            "示例：https://api.deepseek.com 或 https://token.sensenova.cn/v1"
+        )
+    return url.rstrip("/")
+
+
+def _normalize_model(model: str | None) -> str:
+    name = (model or "").strip()
+    return name or DEEPSEEK_MODEL
+
+
+def _is_sensenova(base_url: str) -> bool:
+    return "sensenova.cn" in (base_url or "").lower()
+
+
+def _clamp_max_tokens(base_url: str, model: str, max_tokens: int) -> int:
+    """Avoid 400 from gateway-specific max_tokens caps (e.g. SenseNova)."""
+    if max_tokens <= 0:
+        return max_tokens
+    if _is_sensenova(base_url):
+        cap = (
+            _SENSENOVA_GLM_MAX_OUTPUT_TOKENS
+            if "glm" in (model or "").lower()
+            else _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS
+        )
+        return min(max_tokens, cap)
+    return max_tokens
+
+
+def resolve_provider(
+    provider: str,
+    api_key: str | None = None,
+    *,
+    base_url: str | None = None,
+    model: str | None = None,
+) -> ResolvedProvider:
     pid = (provider or "deepseek").strip().lower()
     key = (api_key or "").strip()
 
@@ -202,13 +253,18 @@ def resolve_provider(provider: str, api_key: str | None = None) -> ResolvedProvi
 
     if pid == "deepseek":
         if not key:
-            raise ValueError("请填写 DeepSeek API Key")
+            raise ValueError("请填写 API Key")
+        resolved_url = _normalize_base_url(base_url)
+        resolved_model = _normalize_model(model)
+        label = "SenseNova" if _is_sensenova(resolved_url) else "OpenAI 兼容"
+        if "deepseek.com" in resolved_url.lower():
+            label = "DeepSeek"
         return ResolvedProvider(
             provider="deepseek",
-            model=DEEPSEEK_MODEL,
-            base_url=DEEPSEEK_BASE_URL,
+            model=resolved_model,
+            base_url=resolved_url,
             api_key=key,
-            label="DeepSeek",
+            label=label,
             needs_user_key=True,
         )
 
@@ -226,10 +282,10 @@ def resolve_provider(provider: str, api_key: str | None = None) -> ResolvedProvi
                 f"已读取 QClaw 配置，但暂时无法连接 Gateway（{base}）。"
                 "请确认 QClaw 已打开；若刚启动请稍等几秒后重试。"
             )
-        model = str(_pick_openclaw_model(base, token) or _OPENCLAW_MODEL)
+        resolved_model = str(_pick_openclaw_model(base, token) or _OPENCLAW_MODEL)
         return ResolvedProvider(
             provider="openclaw",
-            model=model,
+            model=resolved_model,
             base_url=base,
             api_key=token,
             label="openclaw (QClaw)",
@@ -283,10 +339,11 @@ def stream_chat_completions(
     import urllib.request
 
     url = resolved.base_url.rstrip("/") + "/chat/completions"
+    capped = _clamp_max_tokens(resolved.base_url, resolved.model, max_tokens)
     payload: dict[str, Any] = {
         "model": resolved.model,
         "messages": messages,
-        "max_tokens": max_tokens,
+        "max_tokens": capped,
         "stream": True,
     }
     if resolved.provider == "openclaw":

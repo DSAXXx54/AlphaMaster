@@ -83,6 +83,8 @@ class SettingsRequest(BaseModel):
     debug_mode: bool | None = None
     ai_provider: str | None = None
     ai_api_key: str | None = None
+    ai_base_url: str | None = None
+    ai_model: str | None = None
     bt_commission_pct: float | None = None
     bt_slippage_pct: float | None = None
 
@@ -90,6 +92,8 @@ class SettingsRequest(BaseModel):
 class AnalyzeTrainingRequest(BaseModel):
     provider: str | None = None
     api_key: str | None = None
+    base_url: str | None = None
+    model: str | None = None
     symbol: str | None = None
 
 
@@ -349,6 +353,10 @@ def api_put_settings(req: SettingsRequest) -> dict[str, Any]:
         payload["ai_provider"] = req.ai_provider
     if req.ai_api_key is not None:
         payload["ai_api_key"] = req.ai_api_key
+    if req.ai_base_url is not None:
+        payload["ai_base_url"] = req.ai_base_url
+    if req.ai_model is not None:
+        payload["ai_model"] = req.ai_model
     if req.bt_commission_pct is not None:
         payload["bt_commission_pct"] = req.bt_commission_pct
     if req.bt_slippage_pct is not None:
@@ -386,8 +394,10 @@ def api_config() -> dict[str, Any]:
         "last_strategy_file": strat_ctx["last_strategy_file"],
         "strategy_file": strat_ctx["strategy_file"],
         "debug_mode": load_settings().get("debug_mode", False),
-        "ai_provider": load_settings().get("ai_provider", "deepseek"),
-        "ai_api_key": load_settings().get("ai_api_key", ""),
+        "ai_provider": settings.get("ai_provider", "deepseek"),
+        "ai_api_key": settings.get("ai_api_key", ""),
+        "ai_base_url": settings.get("ai_base_url", "https://api.deepseek.com"),
+        "ai_model": settings.get("ai_model", "deepseek-v4-flash"),
         "bt_commission_pct": settings.get("bt_commission_pct", 0.02),
         "bt_slippage_pct": settings.get("bt_slippage_pct", 0.01),
         "server_log": snap["server_log"],
@@ -415,6 +425,12 @@ def api_ai_analyze_training(req: AnalyzeTrainingRequest):
     settings = load_settings()
     raw_key = req.api_key if req.api_key is not None else settings.get("ai_api_key") or ""
     key_lower = str(raw_key).strip().lower()
+    base_url = (
+        req.base_url
+        if req.base_url is not None
+        else settings.get("ai_base_url") or ""
+    )
+    model = req.model if req.model is not None else settings.get("ai_model") or ""
 
     # openclaw_wb 必须先于 openclaw 判断
     if key_lower in ("openclaw_wb",) or key_lower.startswith("openclaw_wb/"):
@@ -427,6 +443,8 @@ def api_ai_analyze_training(req: AnalyzeTrainingRequest):
     save_settings({
         "ai_provider": provider,
         "ai_api_key": str(raw_key).strip(),
+        "ai_base_url": str(base_url).strip(),
+        "ai_model": str(model).strip(),
     })
 
     def event_gen():
@@ -434,6 +452,8 @@ def api_ai_analyze_training(req: AnalyzeTrainingRequest):
             for event in analyze_training_stream(
                 provider=provider,
                 api_key=str(raw_key).strip() or None,
+                base_url=str(base_url).strip() or None,
+                model=str(model).strip() or None,
                 symbol=req.symbol,
             ):
                 yield f"data: {json.dumps(event, ensure_ascii=False)}\n\n"

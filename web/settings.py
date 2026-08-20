@@ -14,6 +14,9 @@ _DEFAULT = {
     "debug_mode": False,
     "ai_provider": "deepseek",
     "ai_api_key": "",
+    # OpenAI 兼容网关（DeepSeek / SenseNova 等）：可自定义 base_url + model
+    "ai_base_url": "https://api.deepseek.com",
+    "ai_model": "deepseek-v4-flash",
     # 回测单边成本（单位 %）：手续费 0.02% + 滑点 0.01% ≈ 常见加密货币轻度成本
     "bt_commission_pct": 0.02,
     "bt_slippage_pct": 0.01,
@@ -118,6 +121,10 @@ def load_settings() -> dict:
     if out["ai_provider"] not in ("deepseek", "openclaw", "openclaw_wb"):
         out["ai_provider"] = "deepseek"
     out["ai_api_key"] = str(out.get("ai_api_key") or "").strip()
+    out["ai_base_url"] = str(
+        out.get("ai_base_url") or _DEFAULT["ai_base_url"]
+    ).strip()
+    out["ai_model"] = str(out.get("ai_model") or _DEFAULT["ai_model"]).strip()
     out["bt_commission_pct"] = _as_pct(
         out.get("bt_commission_pct"), _DEFAULT["bt_commission_pct"]
     )
@@ -181,6 +188,12 @@ def save_settings(data: dict) -> dict:
         )
     if "ai_api_key" in data:
         current["ai_api_key"] = str(data["ai_api_key"] or "").strip()
+    if "ai_base_url" in data:
+        url = str(data["ai_base_url"] or "").strip()
+        current["ai_base_url"] = url or _DEFAULT["ai_base_url"]
+    if "ai_model" in data:
+        model = str(data["ai_model"] or "").strip()
+        current["ai_model"] = model or _DEFAULT["ai_model"]
     if "bt_commission_pct" in data:
         current["bt_commission_pct"] = _as_pct(
             data["bt_commission_pct"], _DEFAULT["bt_commission_pct"]

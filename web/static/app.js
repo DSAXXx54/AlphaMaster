@@ -736,20 +736,37 @@ async function refreshAiProviderStatus() {
 
 async function initAiPanel(cfg) {
   const keyInput = $("aiApiKeyInput");
+  const baseUrlInput = $("aiBaseUrlInput");
+  const modelInput = $("aiModelInput");
   if (!keyInput) return;
 
   if (cfg?.ai_api_key) keyInput.value = cfg.ai_api_key;
   else if (cfg?.ai_provider === "openclaw" || cfg?.ai_provider === "openclaw_wb") {
     keyInput.value = cfg.ai_provider;
   }
+  if (baseUrlInput) {
+    baseUrlInput.value = cfg?.ai_base_url || "https://api.deepseek.com";
+  }
+  if (modelInput) {
+    modelInput.value = cfg?.ai_model || "deepseek-v4-flash";
+  }
 
   await refreshAiProviderStatus();
   if (!keyInput.dataset.aiStatusBound) {
     keyInput.dataset.aiStatusBound = "1";
-    keyInput.addEventListener("input", () => {
+    const refreshHint = () => {
       updateAiChannelHint();
       refreshAiProviderStatus();
-    });
+    };
+    keyInput.addEventListener("input", refreshHint);
+    if (baseUrlInput) {
+      baseUrlInput.addEventListener("input", updateAiChannelHint);
+      baseUrlInput.addEventListener("change", updateAiChannelHint);
+    }
+    if (modelInput) {
+      modelInput.addEventListener("input", updateAiChannelHint);
+      modelInput.addEventListener("change", updateAiChannelHint);
+    }
   }
 }
 
@@ -765,6 +782,12 @@ function resolveAiFromKey(raw) {
   return { provider: "deepseek", apiKey: (raw || "").trim(), isAlias: false };
 }
 
+function readAiEndpointFields() {
+  const baseUrl = ($("aiBaseUrlInput")?.value || "").trim() || "https://api.deepseek.com";
+  const model = ($("aiModelInput")?.value || "").trim() || "deepseek-v4-flash";
+  return { baseUrl, model };
+}
+
 function updateAiChannelHint() {
   const hint = $("aiChannelHint");
   const headHint = $("aiProviderHint");
@@ -774,18 +797,21 @@ function updateAiChannelHint() {
   const resolved = resolveAiFromKey(keyInput.value);
   const status = window.__aiProviderStatus;
   const row = (status?.providers || []).find((p) => p.id === resolved.provider);
+  const { baseUrl, model } = readAiEndpointFields();
+  const isSenseNova = /sensenova\.cn/i.test(baseUrl);
 
   if (resolved.provider === "deepseek") {
-    if (headHint) headHint.textContent = "DeepSeek · deepseek-v4-flash";
-    hint.textContent = "当前：DeepSeek（deepseek-v4-flash · https://api.deepseek.com）。";
+    const label = isSenseNova ? "SenseNova" : (/deepseek\.com/i.test(baseUrl) ? "DeepSeek" : "OpenAI 兼容");
+    if (headHint) headHint.textContent = `${label} · ${model}`;
+    hint.textContent = `当前：${label}（${model} · ${baseUrl}）。可改 Base URL 对接 SenseNova 等兼容网关；Key 填 openclaw / openclaw_wb 可走本地通道。`;
   } else if (resolved.provider === "openclaw") {
     if (headHint) {
       headHint.textContent = row?.available ? "openclaw (QClaw) · 已匹配" : "openclaw (QClaw) · 未就绪";
     }
-    hint.textContent = row?.hint || "已匹配 openclaw：将自动使用本地 QClaw token。";
+    hint.textContent = row?.hint || "已匹配 openclaw：将自动使用本地 QClaw token（忽略上方 Base URL）。";
   } else {
     if (headHint) headHint.textContent = row?.available ? "openclaw_wb · 已匹配" : "openclaw_wb · 未就绪";
-    hint.textContent = row?.hint || "已匹配 openclaw_wb：将自动使用 WorkBuddy token。";
+    hint.textContent = row?.hint || "已匹配 openclaw_wb：将自动使用 WorkBuddy token（忽略上方 Base URL）。";
   }
 }
 
@@ -804,12 +830,20 @@ async function runAiAnalyze() {
   const view = $("aiAnswerView");
   const rawKey = $("aiApiKeyInput")?.value || "";
   const resolved = resolveAiFromKey(rawKey);
+  const { baseUrl, model } = readAiEndpointFields();
   if (!view) return;
 
   if (resolved.provider === "deepseek" && !resolved.apiKey) {
     view.className = "ai-answer error";
-    view.textContent = "请填写 DeepSeek API Key";
+    view.textContent = "请填写 API Key";
     return;
+  }
+  if (resolved.provider === "deepseek") {
+    if (!/^https?:\/\//i.test(baseUrl)) {
+      view.className = "ai-answer error";
+      view.textContent = "Base URL 必须以 http:// 或 https:// 开头（例如 https://token.sensenova.cn/v1）";
+      return;
+    }
   }
 
   await refreshAiProviderStatus();
@@ -828,6 +862,8 @@ async function runAiAnalyze() {
       body: JSON.stringify({
         provider: resolved.provider,
         api_key: resolved.apiKey,
+        base_url: baseUrl,
+        model,
         symbol: selectedSymbol || null,
       }),
     });
@@ -2532,6 +2568,14 @@ async function init() {
   if ($("aiApiKeyInput")) {
     $("aiApiKeyInput").addEventListener("input", updateAiChannelHint);
     $("aiApiKeyInput").addEventListener("change", updateAiChannelHint);
+  }
+  if ($("aiBaseUrlInput")) {
+    $("aiBaseUrlInput").addEventListener("input", updateAiChannelHint);
+    $("aiBaseUrlInput").addEventListener("change", updateAiChannelHint);
+  }
+  if ($("aiModelInput")) {
+    $("aiModelInput").addEventListener("input", updateAiChannelHint);
+    $("aiModelInput").addEventListener("change", updateAiChannelHint);
   }
   if ($("aiAnalyzeBtn")) $("aiAnalyzeBtn").addEventListener("click", runAiAnalyze);
   if ($("aiUnlimitedBtn")) $("aiUnlimitedBtn").addEventListener("click", openUnlimitedModal);

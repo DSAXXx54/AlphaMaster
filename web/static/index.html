@@ -150,14 +150,24 @@
       </div>
       <div class="ai-form">
         <div class="ai-row">
+          <label class="ai-field ai-url-field">
+            <span>Base URL</span>
+            <input type="text" id="aiBaseUrlInput" placeholder="https://api.deepseek.com" autocomplete="off" spellcheck="false" />
+          </label>
+          <label class="ai-field ai-model-field">
+            <span>模型 (model)</span>
+            <input type="text" id="aiModelInput" placeholder="deepseek-v4-flash" autocomplete="off" spellcheck="false" />
+          </label>
+        </div>
+        <div class="ai-row">
           <label class="ai-field ai-key-field" id="aiKeyField">
             <span>API Key</span>
-            <input type="password" id="aiApiKeyInput" placeholder="填入 DeepSeek API Key" autocomplete="off" />
+            <input type="password" id="aiApiKeyInput" placeholder="填入 API Key（或 openclaw / openclaw_wb）" autocomplete="off" />
           </label>
           <button type="button" class="btn btn-primary" id="aiAnalyzeBtn">开始分析</button>
           <button type="button" class="btn btn-unlimited" id="aiUnlimitedBtn">获取无限分析功能</button>
         </div>
-        <small class="field-hint" id="aiChannelHint">使用 DeepSeek（deepseek-v4-flash · https://api.deepseek.com），填入你的 API Key 即可。</small>
+        <small class="field-hint" id="aiChannelHint">OpenAI 兼容网关：可改 Base URL（如 https://token.sensenova.cn/v1）与模型名，再填 API Key。</small>
       </div>
       <div class="ai-answer" id="aiAnswerView">点击「开始分析」后，AI 将回答：当前训练情况怎么样，是否值得继续，以及最新因子的含义与原理。</div>
     </section>
