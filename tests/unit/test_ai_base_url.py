@@ -51,4 +51,8 @@ def test_clamp_max_tokens_sensenova() -> None:
     assert _clamp_max_tokens(url, "deepseek-v4-flash", 4096) == 4096
     assert _clamp_max_tokens(url, "deepseek-v4-flash", 999_999) == 65_536
     assert _clamp_max_tokens(url, "glm-5.2", 999_999) == 131_072
-    assert _clamp_max_tokens(DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, 999_999) == 999_999
+    assert _clamp_max_tokens(DEEPSEEK_BASE_URL, DEEPSEEK_MODEL, 999_999) == 384_000
+
+
+def test_clamp_max_tokens_global_cap() -> None:
+    assert _clamp_max_tokens("https://api.example-proxy.com/v1", "gpt-4", 999_999) == 384_000

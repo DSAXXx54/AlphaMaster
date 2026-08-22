@@ -25,6 +25,8 @@ DEEPSEEK_BASE_URL = "https://api.deepseek.com"
 # SenseNova OpenAI-compatible gateway caps (see PA_Agent deepseek_client).
 _SENSENOVA_GLM_MAX_OUTPUT_TOKENS = 131_072
 _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS = 65_536
+# Global hard cap on several OpenAI-compatible proxies (field MaxTokens [1, 384000]).
+_GLOBAL_MAX_OUTPUT_TOKENS = 384_000
 
 _QCLAW_CONFIG_CANDIDATES = (
     Path.home() / ".qclaw" / "openclaw.json",
@@ -228,8 +230,8 @@ def _clamp_max_tokens(base_url: str, model: str, max_tokens: int) -> int:
             if "glm" in (model or "").lower()
             else _SENSENOVA_DEFAULT_MAX_OUTPUT_TOKENS
         )
-        return min(max_tokens, cap)
-    return max_tokens
+        max_tokens = min(max_tokens, cap)
+    return min(max_tokens, _GLOBAL_MAX_OUTPUT_TOKENS)
 
 
 def resolve_provider(
