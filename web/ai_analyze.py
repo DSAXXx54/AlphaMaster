@@ -20,6 +20,13 @@ _SYSTEM_PROMPT = """你是量化因子挖掘与强化学习训练顾问。
 请基于提供的训练快照，用中文给出专业、具体、可执行的分析。
 不要编造不存在的数据；若信息不足请明确说明。
 
+【语言硬性要求——最高优先级】
+回答必须全部使用中文，正文中禁止出现任何英文单词、字母缩写或英文代码字段名（品种代码如 XAUUSD、BTCUSDT 可以保留）。
+发给你的数据里即使残留英文字段名或英文公式标记，也只能用来理解数据，绝不能原样照抄进回答。
+- 数据字段一律用中文表述：最优分数、验证分数、探索活跃度、平均单步得分、当前步数、总步数、完成进度。禁止写 val_score、best_score、entropy 这类英文字段名。
+- 公式标记必须翻译成中文含义再解释，常见对照：SUPERTREND_DIR=超趋势方向、RVOL=相对成交量、PARKINSON_VOL=帕金森波动率（按最高最低价估计的波动）、TS_MIN_20=最近20期最小值、TS_STD_10=最近10期波动幅度、MIN=取较小值、MAX=取较大值、AC1=涨跌惯性（一阶自相关）、IF_GT=条件判断（大于才触发）、MOMENTUM=动量、DEV=偏离度、RET_ACCEL=收益加速度、AROON_OSC=阿隆摆动（趋势强弱）、SIGNED_POWER=带符号乘方、MUL=相乘、DIV=相除、ADD=相加、SUB=相减。遇到对照表里没有的标记，按常见含义用通俗中文解释，不要写出英文原名。
+- 解释公式时用「超趋势方向 → 相对成交量 → 最近20期最小值 → …」这样的中文写法串联，禁止把英文标记原样写进回答。
+
 评估训练是否值得继续时，请遵守：
 - 以验证集分数（val_score）是否在提高为主，不要轻易下「过拟合」结论，尽量不要提过拟合。
 - best_score 与 val_score 有差距是常见现象，只要验证分数整体在抬升或近期仍有改善，就应视为训练仍有价值。
@@ -52,8 +59,90 @@ _SYSTEM_PROMPT = """你是量化因子挖掘与强化学习训练顾问。
 
 ## 2. 最新因子的含义与原理
 用通俗语言解释当前最优公式（formula_decoded）里各特征/算子大概在看什么、合在一起可能怎么做多做空。
+解释时必须用上面对照表里的中文名称，禁止出现英文标记。
 少用术语；若公式相对上次有变化，用一句话说清楚差在哪里。
+
+最后再次检查：回答全文除品种代码外，不得出现任何英文单词或字母。
 """
+
+
+# 发给模型的数据统一用中文字段名，避免模型回复里夹杂英文
+_KEY_ZH = {
+    "symbol": "品种",
+    "timeframe": "周期",
+    "data_file": "数据文件",
+    "training_active": "是否正在训练",
+    "job_state": "任务状态",
+    "current_step": "当前步数",
+    "train_steps": "总步数",
+    "progress_pct": "完成进度百分比",
+    "status": "训练状态",
+    "best_score": "最优分数",
+    "strategy_score": "策略分数",
+    "has_strategy": "是否已有策略",
+    "formula": "公式编号",
+    "formula_decoded": "当前最优公式",
+    "checkpoint_path": "存档文件",
+    "training_curve": "训练曲线",
+    "history_summary": "历史摘要",
+    "total_points": "记录点总数",
+    "sampled": "是否抽样",
+    "points": "记录点数",
+    "note": "说明",
+    "series": "数据序列",
+    "step": "步数",
+    "val_score": "验证分数",
+    "entropy": "探索活跃度",
+    "avg_reward": "平均单步得分",
+    "stable_rank": "稳定度",
+    "step_first": "起始步数",
+    "step_last": "最新步数",
+    "best_score_first": "最优分数_最初",
+    "best_score_last": "最优分数_最新",
+    "best_score_max": "最优分数_最高",
+    "best_score_max_at_index": "最优分数_最高出现位置",
+    "best_score_stagnation_points": "最优分数_连续停滞点数",
+    "best_score_phase_means": "最优分数_分段平均",
+    "val_score_first": "验证分数_最初",
+    "val_score_last": "验证分数_最新",
+    "val_score_max": "验证分数_最高",
+    "val_score_phase_means": "验证分数_分段平均",
+    "entropy_first": "探索活跃度_最初",
+    "entropy_last": "探索活跃度_最新",
+    "early": "前期",
+    "mid": "中期",
+    "late": "后期",
+}
+
+_STATE_ZH = {
+    "idle": "空闲",
+    "running": "训练中",
+    "completed": "已完成",
+    "stopped": "已停止",
+    "failed": "失败",
+    "in_progress": "训练中",
+    "strategy_only": "仅有策略",
+}
+
+_BOOL_KEYS = {"training_active", "has_strategy", "sampled"}
+
+
+def _zh_data(obj: Any) -> Any:
+    """递归把发给模型的字段名/状态值换成中文。"""
+    if isinstance(obj, dict):
+        out: dict[str, Any] = {}
+        for key, val in obj.items():
+            zh_key = _KEY_ZH.get(key, key)
+            if key in _BOOL_KEYS and isinstance(val, bool):
+                out[zh_key] = "是" if val else "否"
+            elif key in ("job_state", "status") and isinstance(val, str):
+                out[zh_key] = _STATE_ZH.get(val, val)
+            else:
+                out[zh_key] = _zh_data(val)
+        return out
+    if isinstance(obj, list):
+        return [_zh_data(item) for item in obj]
+    return obj
 
 
 def build_training_snapshot(symbol: str | None = None) -> dict[str, Any]:
@@ -170,15 +259,23 @@ def analyze_training_stream(
         "2. 最新因子的含义与原理是什么？",
         "",
         "【当前训练快照】",
-        f"```json\n{json.dumps(snapshot, ensure_ascii=False, indent=2)}\n```",
+        f"```json\n{json.dumps(_zh_data(snapshot), ensure_ascii=False, indent=2)}\n```",
     ]
     if prior:
+        prior_for_prompt = [
+            {
+                "分析时间": row.get("analyzed_at"),
+                "当时快照": _zh_data(row.get("snapshot") or {}),
+                "当时的分析结论": row.get("answer") or "",
+            }
+            for row in prior
+        ]
         parts.extend(
             [
                 "",
                 f"【同品种同周期历史分析（共 {len(prior)} 次，按时间从旧到新）】",
                 "请对比这些历史记录，判断相对上次是否有改善。",
-                f"```json\n{json.dumps(prior, ensure_ascii=False, indent=2)}\n```",
+                f"```json\n{json.dumps(prior_for_prompt, ensure_ascii=False, indent=2)}\n```",
             ]
         )
     else:
